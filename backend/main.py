@@ -631,6 +631,109 @@ def check_model_predictions_endpoint(
     }
 
 
+_RENDER_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+@app.post("/api/render/start")
+def start_async_render_video(
+    payload: SessionAnnotationPayload,
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    """
+    Start an asynchronous background OpenCV + FFmpeg render job so long videos never trigger
+    reverse-proxy (Nginx/Cloudflare) 60s gateway timeouts, and allow live progress polling.
+    """
+    session = storage.get_session(payload.video_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Locate uploaded video file first
+    input_candidates = list(storage.uploads_dir.glob(f"{session.video_id}.*"))
+    input_video_path = None
+    for cand in input_candidates:
+        if cand.suffix.lower() in ALLOWED_EXTENSIONS:
+            input_video_path = cand
+            break
+
+    if input_video_path is None or not input_video_path.exists():
+        raise HTTPException(status_code=404, detail="Uploaded source video file not found")
+
+    video_id = session.video_id
+    _RENDER_JOBS[video_id] = {
+        "status": "running",
+        "progress_pct": 1,
+        "message": "Refining acoustic & visual signature profile...",
+        "result": None,
+        "error": None,
+    }
+
+    def _worker() -> None:
+        try:
+            annotation_result = save_and_refine_annotations(payload, storage)
+            updated_session = SessionRecord(**annotation_result["session"])
+
+            output_filename = f"{video_id}_annotated.mp4"
+            output_video_path = storage.outputs_dir / output_filename
+
+            def _on_progress(pct: int, msg: str) -> None:
+                _RENDER_JOBS[video_id]["progress_pct"] = pct
+                _RENDER_JOBS[video_id]["message"] = msg
+
+            render_annotated_video(
+                input_video_path=input_video_path,
+                output_video_path=output_video_path,
+                gun_name=updated_session.gun_name,
+                beep_timestamp=updated_session.beep_timestamp,
+                shot_timestamps=updated_session.shot_timestamps,
+                end_beep_timestamp=updated_session.end_beep_timestamp,
+                progress_callback=_on_progress,
+            )
+
+            download_url = f"/api/videos/{video_id}/download"
+            preview_url = f"/api/media/outputs/{output_filename}"
+
+            updated_session.rendered_video_url = download_url
+            storage.save_session(updated_session)
+
+            _RENDER_JOBS[video_id] = {
+                "status": "completed",
+                "progress_pct": 100,
+                "message": "Annotated video ready!",
+                "error": None,
+                "result": {
+                    "session": updated_session.model_dump(),
+                    "analytics": annotation_result["analytics"],
+                    "signature": annotation_result["signature"],
+                    "download_url": download_url,
+                    "preview_url": preview_url,
+                },
+            }
+        except Exception as exc:
+            _RENDER_JOBS[video_id] = {
+                "status": "failed",
+                "progress_pct": 0,
+                "message": f"Render failed: {exc}",
+                "error": str(exc),
+                "result": None,
+            }
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {
+        "video_id": video_id,
+        "status": "running",
+        "progress_pct": 1,
+        "message": "Render job started...",
+    }
+
+
+@app.get("/api/render/status/{video_id}")
+def get_async_render_status(video_id: str) -> Dict[str, Any]:
+    job = _RENDER_JOBS.get(video_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Render job not found")
+    return job
+
+
 @app.post("/api/render")
 def process_and_render_video(
     payload: SessionAnnotationPayload,

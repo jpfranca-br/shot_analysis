@@ -1,6 +1,6 @@
 from pathlib import Path
 import subprocess
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import cv2
 import imageio_ffmpeg
@@ -43,6 +43,7 @@ def render_annotated_video(
     shot_timestamps: List[float],
     end_beep_timestamp: Optional[float] = None,
     popup_duration_sec: float = 1.6,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Path:
     """
     Generate an annotated output video using opencv-python (FR-5.1, FR-5.2, FR-5.3).
@@ -70,6 +71,7 @@ def render_annotated_video(
     out_fps = 30.0 if 23.0 <= fps <= 31.0 else round(float(fps), 2)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+    total_src_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
     temp_raw_mp4 = output_video_path.with_suffix(".cv2_raw.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -81,6 +83,9 @@ def render_annotated_video(
     src_frame_idx = 0
     written_frames = 0
     prev_pts = 0.0
+
+    if progress_callback:
+        progress_callback(2, "Starting OpenCV HUD frame rendering...")
 
     while True:
         ret, frame = cap.read()
@@ -378,8 +383,21 @@ def render_annotated_video(
             writer.write(frame)
             written_frames += 1
 
+        if progress_callback and src_frame_idx % 15 == 0:
+            if total_src_frames > 0:
+                pct = min(85, max(3, int((src_frame_idx / total_src_frames) * 85)))
+                progress_callback(
+                    pct,
+                    f"Rendering OpenCV overlays: Frame {src_frame_idx} / {total_src_frames} ({pct}%)",
+                )
+            else:
+                progress_callback(50, f"Rendering OpenCV overlays: Frame {src_frame_idx}...")
+
     cap.release()
     writer.release()
+
+    if progress_callback:
+        progress_callback(88, "Encoding H.264 MP4 & syncing audio track via FFmpeg...")
 
     # Remux with original audio (aligned to first_pts=0) and transcode to H.264 MP4
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -398,7 +416,7 @@ def render_annotated_video(
         "-c:v",
         "libx264",
         "-preset",
-        "fast",
+        "ultrafast",
         "-pix_fmt",
         "yuv420p",
         "-af",
@@ -415,7 +433,7 @@ def render_annotated_video(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=600,
     )
     if res.returncode != 0 or not output_video_path.exists():
         # Fallback: keep the OpenCV MP4 output directly if ffmpeg mux fails
@@ -426,5 +444,8 @@ def render_annotated_video(
             temp_raw_mp4.unlink(missing_ok=True)
         except OSError:
             pass
+
+    if progress_callback:
+        progress_callback(100, "Annotated video ready!")
 
     return output_video_path

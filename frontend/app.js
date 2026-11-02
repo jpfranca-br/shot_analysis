@@ -1317,13 +1317,14 @@ async function downloadRenderedVideoParallel(e) {
 async function processAndRenderVideo() {
   if (!state.session) return;
   els.processVideoBtn.disabled = true;
-  els.processVideoBtn.textContent = "⏳ Rendering OpenCV Video Overlays...";
-  showToast("Rendering burnt-in performance overlays with OpenCV...");
+  els.processVideoBtn.textContent = "⏳ Starting Render Job (0%)...";
+  showToast("⏳ Starting background OpenCV video render job...");
 
   try {
     ensureBeepOrder();
+    const videoId = state.session.video_id;
     const body = {
-      video_id: state.session.video_id,
+      video_id: videoId,
       gun_name: els.firearmInput.value.trim() || state.session.gun_name,
       beep_timestamp: state.beepTimestamp,
       end_beep_timestamp: state.endBeepTimestamp,
@@ -1331,33 +1332,59 @@ async function processAndRenderVideo() {
       user_modified: state.userModified,
     };
 
-    const res = await fetch("/api/render", {
+    const startRes = await fetch("/api/render/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
 
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || "Video rendering failed");
+    if (!startRes.ok) {
+      let detail = `HTTP ${startRes.status}`;
+      try {
+        const err = await startRes.json();
+        if (err.detail) detail = err.detail;
+      } catch (_) {}
+      throw new Error(detail || "Failed to start video rendering");
     }
 
-    const data = await res.json();
-    state.session = data.session;
-    state.signature = data.signature;
-    state.renderedPreviewUrl = `${data.preview_url}?t=${Date.now()}`;
+    // Poll /api/render/status/{videoId} every 1.0s so reverse proxies never time out
+    let renderResult = null;
+    while (true) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const statRes = await fetch(`/api/render/status/${encodeURIComponent(videoId)}`);
+      if (!statRes.ok) {
+        throw new Error(`Render status check failed (HTTP ${statRes.status})`);
+      }
+      const job = await statRes.json();
+      const pct = Number(job.progress_pct) || 0;
+      const msg = job.message || `Rendering video (${pct}%)...`;
+
+      if (job.status === "completed" && job.result) {
+        renderResult = job.result;
+        break;
+      } else if (job.status === "failed") {
+        throw new Error(job.error || job.message || "Video rendering failed on server");
+      } else {
+        els.processVideoBtn.textContent = `⏳ Rendering (${pct}%)...`;
+        showToast(`⏳ ${msg}`);
+      }
+    }
+
+    state.session = renderResult.session;
+    state.signature = renderResult.signature;
+    state.renderedPreviewUrl = `${renderResult.preview_url}?t=${Date.now()}`;
 
     renderSignatureUI();
     renderAnalyticsUI();
     await fetchFirearms();
 
-    els.downloadVideoLink.href = data.download_url;
+    els.downloadVideoLink.href = renderResult.download_url;
     els.downloadVideoLink.hidden = false;
     els.videoSourceToggle.hidden = false;
 
-    showToast("✓ Annotated video rendered! Click Download or switch to Rendered Preview.");
+    showToast("✓ Annotated video rendered! Click Download (8-thread) or switch to Rendered Preview.");
   } catch (err) {
-    showToast(err.message, true);
+    showToast(`✕ ${err.message}`, true);
   } finally {
     els.processVideoBtn.disabled = false;
     els.processVideoBtn.textContent = "⚙ Process Video with Burnt-In Overlays";
