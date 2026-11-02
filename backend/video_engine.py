@@ -73,9 +73,57 @@ def render_annotated_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
     total_src_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
-    temp_raw_mp4 = output_video_path.with_suffix(".cv2_raw.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(temp_raw_mp4), fourcc, out_fps, (width, height))
+    # Single-Pass FFmpeg pipeline: pipe annotated raw BGR24 frames directly into FFmpeg
+    # while simultaneously encoding H.264 and muxing original audio into output_video_path
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    cmd = [
+        ffmpeg_exe,
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(out_fps),
+        "-i",
+        "pipe:0",
+        "-i",
+        str(input_video_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-af",
+        "aresample=async=1:first_pts=0",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        "-shortest",
+        str(output_video_path),
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
     font = cv2.FONT_HERSHEY_DUPLEX
     scale_factor = max(0.55, min(1.3, width / 1000.0))
@@ -85,7 +133,7 @@ def render_annotated_video(
     prev_pts = 0.0
 
     if progress_callback:
-        progress_callback(2, "Starting OpenCV HUD frame rendering...")
+        progress_callback(2, "Starting Single-Pass OpenCV + FFmpeg H.264 rendering...")
 
     while True:
         ret, frame = cap.read()
@@ -376,74 +424,35 @@ def render_annotated_video(
                     cv2.LINE_AA,
                 )
 
-        # Write frame(s) to CFR output writer so output timestamp matches source VFR PTS
+        # Pipe frame(s) directly into FFmpeg stdin so output CFR timestamp matches source VFR PTS
         target_cfr_idx = int(round(t * out_fps))
         repeats = max(1, min(15, target_cfr_idx - written_frames + 1))
-        for _ in range(repeats):
-            writer.write(frame)
-            written_frames += 1
+        raw_bytes = frame.tobytes()
+        if proc.stdin is not None:
+            try:
+                for _ in range(repeats):
+                    proc.stdin.write(raw_bytes)
+                    written_frames += 1
+            except BrokenPipeError:
+                break
 
         if progress_callback and src_frame_idx % 15 == 0:
             if total_src_frames > 0:
-                pct = min(85, max(3, int((src_frame_idx / total_src_frames) * 85)))
+                pct = min(98, max(3, int((src_frame_idx / total_src_frames) * 98)))
                 progress_callback(
                     pct,
-                    f"Rendering OpenCV overlays: Frame {src_frame_idx} / {total_src_frames} ({pct}%)",
+                    f"Single-Pass H.264 Render: Frame {src_frame_idx} / {total_src_frames} ({pct}%)",
                 )
             else:
-                progress_callback(50, f"Rendering OpenCV overlays: Frame {src_frame_idx}...")
+                progress_callback(50, f"Single-Pass H.264 Render: Frame {src_frame_idx}...")
 
     cap.release()
-    writer.release()
-
-    if progress_callback:
-        progress_callback(88, "Encoding H.264 MP4 & syncing audio track via FFmpeg...")
-
-    # Remux with original audio (aligned to first_pts=0) and transcode to H.264 MP4
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    cmd = [
-        ffmpeg_exe,
-        "-nostdin",
-        "-y",
-        "-i",
-        str(temp_raw_mp4),
-        "-i",
-        str(input_video_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-pix_fmt",
-        "yuv420p",
-        "-af",
-        "aresample=async=1:first_pts=0",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        str(output_video_path),
-    ]
-    res = subprocess.run(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    if res.returncode != 0 or not output_video_path.exists():
-        # Fallback: keep the OpenCV MP4 output directly if ffmpeg mux fails
-        if temp_raw_mp4.exists():
-            temp_raw_mp4.replace(output_video_path)
-    else:
+    if proc.stdin is not None:
         try:
-            temp_raw_mp4.unlink(missing_ok=True)
+            proc.stdin.close()
         except OSError:
             pass
+    proc.wait(timeout=300)
 
     if progress_callback:
         progress_callback(100, "Annotated video ready!")
