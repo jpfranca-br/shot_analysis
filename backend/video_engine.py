@@ -385,6 +385,7 @@ def render_annotated_video(
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [
         ffmpeg_exe,
+        "-nostdin",
         "-y",
         "-i",
         str(temp_raw_mp4),
@@ -409,7 +410,13 @@ def render_annotated_video(
         "-shortest",
         str(output_video_path),
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
     if res.returncode != 0 or not output_video_path.exists():
         # Fallback: keep the OpenCV MP4 output directly if ffmpeg mux fails
         if temp_raw_mp4.exists():

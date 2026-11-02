@@ -35,6 +35,7 @@ def extract_normalized_mono_pcm(video_path: Path, output_wav_path: Path) -> floa
     temp_wav = output_wav_path.with_suffix(".raw.wav")
     cmd = [
         ffmpeg_exe,
+        "-nostdin",
         "-y",
         "-i",
         str(video_path),
@@ -48,7 +49,13 @@ def extract_normalized_mono_pcm(video_path: Path, output_wav_path: Path) -> floa
         str(temp_wav),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
     if result.returncode != 0 or not temp_wav.exists():
         duration = _get_video_duration_fallback(video_path)
         samples = np.zeros(int(max(duration, 1.0) * TARGET_SR), dtype=np.float32)

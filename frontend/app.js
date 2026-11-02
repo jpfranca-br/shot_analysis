@@ -14,6 +14,7 @@ const state = {
   isSyncingRegions: false,
   previewMode: "original", // "original" | "rendered"
   renderedPreviewUrl: null,
+  localVideoObjectUrl: null,
 };
 
 // DOM References
@@ -29,6 +30,7 @@ const els = {
   selectedFileName: document.getElementById("selectedFileName"),
   uploadBtn: document.getElementById("uploadBtn"),
   demoBtn: document.getElementById("demoBtn"),
+  uploadStatusBox: document.getElementById("uploadStatusBox"),
   editorStatusText: document.getElementById("editorStatusText"),
   videoSourceToggle: document.getElementById("videoSourceToggle"),
   viewOriginalBtn: document.getElementById("viewOriginalBtn"),
@@ -94,6 +96,21 @@ function showToast(message, isError = false) {
     ? "rgba(239, 68, 68, 0.55)"
     : "rgba(14, 165, 233, 0.45)";
   els.statusToast.style.color = isError ? "#fca5a5" : "#bae6fd";
+}
+
+function showUploadStatus(message, isError = false) {
+  if (!els.uploadStatusBox) return;
+  if (!message) {
+    els.uploadStatusBox.hidden = true;
+    els.uploadStatusBox.textContent = "";
+    return;
+  }
+  els.uploadStatusBox.hidden = false;
+  els.uploadStatusBox.textContent = message;
+  els.uploadStatusBox.style.borderColor = isError
+    ? "rgba(239, 68, 68, 0.65)"
+    : "rgba(14, 165, 233, 0.45)";
+  els.uploadStatusBox.style.color = isError ? "#fca5a5" : "#bae6fd";
 }
 
 function showModalFeedback(message, isError = false) {
@@ -836,7 +853,8 @@ async function initWaveSurfer(session) {
   els.zoomSlider.value = "0";
   els.videoPlaceholder.hidden = true;
   els.videoPlaceholder.style.display = "none";
-  els.practiceVideo.src = session.video_url;
+  const videoSrc = state.localVideoObjectUrl || session.video_url;
+  els.practiceVideo.src = videoSrc;
   els.practiceVideo.load();
 
   let decoded = null;
@@ -873,7 +891,7 @@ async function initWaveSurfer(session) {
     autoScroll: true,
     autoCenter: false,
     media: els.practiceVideo,
-    url: session.video_url,
+    url: videoSrc,
     plugins: [regions, timeline],
   };
 
@@ -1266,43 +1284,119 @@ function bindEvents() {
     }
   });
 
-  // Upload Form Submit
+  // Upload Form Submit with live XHR upload progress & detailed error reporting
   els.uploadForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const file = els.videoFileInput.files[0];
     const gunName = els.firearmInput.value.trim();
 
     if (!gunName) {
+      showUploadStatus("Please specify a firearm name (FR-1.2).", true);
       showToast("Please specify a firearm name (FR-1.2).", true);
       return;
     }
     if (!file) {
-      showToast("Please select a video file (.mp4, .mov, .webm) or click 'Load Sample'.", true);
+      const msg = "Please select a video file (.mp4, .mov, .webm) or click 'Load Sample'.";
+      showUploadStatus(msg, true);
+      showToast(msg, true);
       return;
     }
 
     els.uploadBtn.disabled = true;
-    els.uploadBtn.textContent = "⏳ Analyzing...";
+    const totalMb = (file.size / (1024 * 1024)).toFixed(2);
+    els.uploadBtn.textContent = "⏳ Uploading 0%...";
+    showUploadStatus(`⏳ Starting upload of "${file.name}" (${totalMb} MB) to server...`);
 
     try {
       const formData = new FormData();
       formData.append("video", file);
       formData.append("gun_name", gunName);
 
-      const res = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
+      const data = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload", true);
+
+        xhr.upload.onprogress = (evt) => {
+          if (evt.lengthComputable) {
+            const pct = Math.min(100, Math.round((evt.loaded / evt.total) * 100));
+            const loadedMb = (evt.loaded / (1024 * 1024)).toFixed(2);
+            if (pct < 100) {
+              els.uploadBtn.textContent = `⏳ Uploading ${pct}%`;
+              showUploadStatus(
+                `⬆ Uploading to server: ${pct}% (${loadedMb} / ${totalMb} MB)...`
+              );
+            } else {
+              els.uploadBtn.textContent = "⏳ Analyzing on Server...";
+              showUploadStatus(
+                `⚙ Upload 100% (${totalMb} MB received). Server is extracting PCM audio & analyzing...`
+              );
+            }
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch (parseErr) {
+              reject(new Error("Invalid JSON response from server."));
+            }
+          } else {
+            let detail = "";
+            try {
+              const parsed = JSON.parse(xhr.responseText);
+              detail = parsed.detail || "";
+            } catch (_) {
+              detail = (xhr.responseText || "").replace(/<[^>]*>/g, " ").trim().slice(0, 140);
+            }
+            if (xhr.status === 413) {
+              reject(
+                new Error(
+                  `HTTP 413 Payload Too Large (${totalMb} MB). Your reverse proxy (e.g., Nginx) blocked the upload — add 'client_max_body_size 500M;' to your Nginx config.`
+                )
+              );
+            } else if (xhr.status === 502 || xhr.status === 504) {
+              reject(
+                new Error(
+                  `HTTP ${xhr.status} Gateway Error/Timeout. Check that uvicorn is running and proxy_read_timeout is >= 300s.`
+                )
+              );
+            } else {
+              reject(
+                new Error(
+                  `Upload failed (HTTP ${xhr.status})${detail ? ": " + detail : ""}`
+                )
+              );
+            }
+          }
+        };
+
+        xhr.onerror = () => {
+          reject(
+            new Error(
+              "Network error while uploading to server. Check connection or reverse proxy upload size limits."
+            )
+          );
+        };
+
+        xhr.ontimeout = () => {
+          reject(new Error("Upload timed out waiting for server response."));
+        };
+
+        xhr.send(formData);
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Upload failed");
+      if (state.localVideoObjectUrl) {
+        URL.revokeObjectURL(state.localVideoObjectUrl);
       }
+      state.localVideoObjectUrl = URL.createObjectURL(file);
 
-      const data = await res.json();
       handleSessionLoaded(data);
-      showToast(`✓ Loaded "${file.name}" (${data.session.mode.toUpperCase()} mode).`);
+      const okMsg = `✓ Loaded "${file.name}" (${data.session.mode.toUpperCase()} mode).`;
+      showUploadStatus(okMsg, false);
+      showToast(okMsg, false);
     } catch (err) {
+      showUploadStatus(`✕ ${err.message}`, true);
       showToast(err.message, true);
     } finally {
       els.uploadBtn.disabled = false;
@@ -1315,6 +1409,7 @@ function bindEvents() {
     const gunName = els.firearmInput.value.trim() || "CZ P-10C 9mm";
     els.demoBtn.disabled = true;
     els.demoBtn.textContent = "⏳ Generating Sample...";
+    showUploadStatus("⏳ Generating synthetic sample drill video on server...");
 
     try {
       const formData = new FormData();
@@ -1328,13 +1423,19 @@ function bindEvents() {
         throw new Error(err.detail || "Demo creation failed");
       }
       const data = await res.json();
+      if (state.localVideoObjectUrl) {
+        URL.revokeObjectURL(state.localVideoObjectUrl);
+        state.localVideoObjectUrl = null;
+      }
       handleSessionLoaded(data);
-      showToast(
+      const msg =
         data.session.mode === "automated"
           ? `✓ Sample drill loaded! Automated detection found Beep & ${data.session.shot_timestamps.length} shots.`
-          : `✓ Sample drill loaded in Cold Start mode! Try placing Beep at 1.00s and Shots at 2.25s, 2.70s, 3.10s, 3.55s.`
-      );
+          : `✓ Sample drill loaded in Cold Start mode! Try placing Beep at 1.00s and Shots at 2.25s, 2.70s, 3.10s, 3.55s.`;
+      showUploadStatus(msg, false);
+      showToast(msg, false);
     } catch (err) {
+      showUploadStatus(`✕ ${err.message}`, true);
       showToast(err.message, true);
     } finally {
       els.demoBtn.disabled = false;
@@ -1517,7 +1618,7 @@ function bindEvents() {
     els.viewOriginalBtn.classList.add("btn-active");
     els.viewRenderedBtn.classList.remove("btn-active");
     const cur = els.practiceVideo.currentTime;
-    els.practiceVideo.src = state.session.video_url;
+    els.practiceVideo.src = state.localVideoObjectUrl || state.session.video_url;
     els.practiceVideo.currentTime = cur;
   });
 

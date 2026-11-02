@@ -143,6 +143,7 @@ def generate_synthetic_practice_video(
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [
         ffmpeg_exe,
+        "-nostdin",
         "-y",
         "-i",
         str(temp_vid),
@@ -159,7 +160,14 @@ def generate_synthetic_practice_video(
         "-shortest",
         str(output_mp4_path),
     ]
-    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    subprocess.run(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
 
     try:
         temp_wav.unlink(missing_ok=True)

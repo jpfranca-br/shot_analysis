@@ -193,7 +193,7 @@ def delete_firearm_endpoint(
 
 
 @app.post("/api/upload")
-async def upload_video(
+def upload_video(
     video: UploadFile = File(...),
     gun_name: str = Form(...),
     storage: StorageManager = Depends(get_storage),
@@ -224,11 +224,15 @@ async def upload_video(
     video_path = storage.uploads_dir / saved_video_name
     wav_path = storage.uploads_dir / saved_wav_name
 
+    print(f"[Upload {video_id}] Saving uploaded file '{orig_filename}'...", flush=True)
     with video_path.open("wb") as buffer:
         shutil.copyfileobj(video.file, buffer)
+    size_mb = video_path.stat().st_size / (1024 * 1024)
+    print(f"[Upload {video_id}] Saved {size_mb:.2f} MB. Extracting mono PCM audio via FFmpeg...", flush=True)
 
     # FR-1.3: Extract audio track into normalized mono PCM stream
     duration_sec = extract_normalized_mono_pcm(video_path, wav_path)
+    print(f"[Upload {video_id}] Audio extracted ({duration_sec:.2f}s). Checking signature for '{cleaned_gun}'...", flush=True)
 
     # FR-2.1: Check local database for existing audio profile associated with firearm name
     signature = storage.get_signature(cleaned_gun)
@@ -240,9 +244,11 @@ async def upload_video(
         end_beep_timestamp = None
         shot_timestamps = []
         sig_version = None
+        print(f"[Upload {video_id}] Cold Start (training mode) ready.", flush=True)
     else:
         # FR-2.3: Automated Mode using Multimodal (Video + Audio) detection
         mode = "automated"
+        print(f"[Upload {video_id}] Running multimodal detection (v{signature.signature_version})...", flush=True)
         beep_timestamp, shot_timestamps, end_beep_timestamp = detect_events_with_limit(
             wav_path=wav_path,
             signature=signature,
@@ -250,6 +256,10 @@ async def upload_video(
             base_dir=storage.base_dir,
         )
         sig_version = signature.signature_version
+        print(
+            f"[Upload {video_id}] Detection complete: beep={beep_timestamp}, limit={end_beep_timestamp}, shots={len(shot_timestamps)}",
+            flush=True,
+        )
 
     session = SessionRecord(
         video_id=video_id,
