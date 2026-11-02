@@ -81,21 +81,23 @@ cd shot_analysis
 
 ### 2. Create & Activate a Virtual Environment
 
+> **Tip:** Using `--clear` ensures any previous virtual environment files (e.g., from a different Python version) are cleanly replaced.
+
 **On Windows (PowerShell):**
 ```powershell
-python -m venv .venv
+python -m venv --clear .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
 **On Windows (Command Prompt):**
 ```cmd
-python -m venv .venv
+python -m venv --clear .venv
 .venv\Scripts\activate.bat
 ```
 
 **On macOS / Linux:**
 ```bash
-python3 -m venv .venv
+python3 -m venv --clear .venv
 source .venv/bin/activate
 ```
 
