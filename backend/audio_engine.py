@@ -9,9 +9,10 @@ import numpy as np
 import soundfile as sf
 
 from backend.models import BeepProfile, FirearmAudioSignature, ShotProfile
+from backend.yamnet_model import YAMNetClassifier
 
 TARGET_SR = 22050
-DUAL_REGIME_SPLIT_THRESHOLD = 0.85  # Seconds separating Isolated (>0.85s) vs Rapid Follow-up (<=0.85s)
+SLOW_SHOT_THRESHOLD_SEC = 2.000  # 2000ms threshold separating Slow (>2000ms) vs Fast (<=2000ms) shots
 
 
 def extract_normalized_mono_pcm(video_path: Path, output_wav_path: Path) -> float:
@@ -57,7 +58,6 @@ def extract_normalized_mono_pcm(video_path: Path, output_wav_path: Path) -> floa
     if y.ndim > 1:
         y = np.mean(y, axis=1)
 
-    # Remove DC offset and normalize peak to 0.95 (FR-1.3 normalized mono PCM stream)
     if len(y) > 0:
         y = y - np.mean(y)
         peak = float(np.max(np.abs(y)))
@@ -87,8 +87,10 @@ def _l2_normalize(vec: np.ndarray) -> List[float]:
     return [round(float(x), 6) for x in vec]
 
 
-def _has_nonzero_features(vec: Optional[List[float]]) -> bool:
-    return bool(vec and len(vec) == 16 and any(abs(x) > 1e-6 for x in vec))
+def _has_nonzero_vec(vec: Optional[List[float]], expected_len: int) -> bool:
+    return bool(
+        vec and len(vec) == expected_len and any(abs(x) > 1e-6 for x in vec)
+    )
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -105,7 +107,7 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
 
 def _extract_window_features(y_win: np.ndarray, sr: int) -> List[float]:
     """
-    Extract a 16-dimensional acoustic feature vector for tonal signals (Timer Beep):
+    Extract a 16-dimensional acoustic feature vector using librosa:
     - 13 mean MFCC coefficients
     - Mean spectral centroid (scaled)
     - Mean spectral bandwidth (scaled)
@@ -143,122 +145,25 @@ def _extract_window_features(y_win: np.ndarray, sr: int) -> List[float]:
     return _l2_normalize(raw_vec)
 
 
-def _compute_reverb_subtracted_hf_flux(
-    y: np.ndarray, sr: int, n_fft: int = 512, hop_length: int = 128
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _extract_regime_acoustic_features(
+    y: np.ndarray, sr: int, shot_t: float, regime: str
+) -> List[float]:
     """
-    Compute Reverb-Subtracted High-Frequency Positive Spectral Flux (1.8 kHz - 10.5 kHz)
-    and Positive Log-RMS Attack Derivative to unmask rapid follow-up shots inside heavy reverb.
-    Returns:
-      - hf_flux_norm: normalized reverb-subtracted HF positive flux envelope
-      - attack_norm: normalized positive log-RMS derivative envelope
-      - rms: raw frame RMS envelope
+    Extract 16-D acoustic features tailored to Slow (>2000ms) vs Fast (<=2000ms) shots:
+    - Slow shot (>2000ms apart or first shot): [shot_t - 0.020s, shot_t + 0.250s] (270ms window
+      capturing full uncompressed attack + ballistic room decay).
+    - Fast shot (<=2000ms apart): [shot_t - 0.012s, shot_t + 0.125s] (137ms tight window
+      avoiding adjacent shots while capturing AGC-compressed muzzle crack).
     """
-    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
-    n_frames = S.shape[1]
-
-    # Causal leaky-integrator reverberation floor estimator per frequency bin
-    # Tracks decaying room reverberation over ~65 ms and subtracts it from incoming frames
-    reverb_floor = np.zeros_like(S)
-    decay_alpha = 0.82
-    for t_idx in range(1, n_frames):
-        reverb_floor[:, t_idx] = (
-            decay_alpha * reverb_floor[:, t_idx - 1]
-            + (1.0 - decay_alpha) * S[:, t_idx - 1]
-        )
-
-    S_clean = np.maximum(0.0, S - 0.88 * reverb_floor)
-    S_log = np.log1p(25.0 * S_clean)
-
-    # Positive spectral flux on reverb-subtracted log spectrogram
-    diff_S = np.diff(S_log, axis=1, prepend=S_log[:, :1])
-    pos_flux = np.maximum(0.0, diff_S)
-
-    hf_mask = (freqs >= 1800.0) & (freqs <= (sr / 2.0))
-    if not np.any(hf_mask):
-        hf_mask = freqs >= 1000.0
-
-    hf_flux = np.sum(pos_flux[hf_mask, :], axis=0)
-    if np.max(hf_flux) > 1e-8:
-        hf_flux_norm = hf_flux / np.max(hf_flux)
+    if regime == "slow":
+        start_idx = max(0, int((shot_t - 0.020) * sr))
+        end_idx = min(len(y), int((shot_t + 0.250) * sr))
     else:
-        hf_flux_norm = hf_flux
+        start_idx = max(0, int((shot_t - 0.012) * sr))
+        end_idx = min(len(y), int((shot_t + 0.125) * sr))
 
-    # Positive log-RMS attack derivative (captures sharp energy re-excitations during loud reverb tails)
-    rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop_length)[0]
-    log_rms = np.log1p(40.0 * rms)
-    attack = np.maximum(0.0, np.diff(log_rms, prepend=log_rms[:1]))
-    if np.max(attack) > 1e-8:
-        attack_norm = attack / np.max(attack)
-    else:
-        attack_norm = attack
-
-    return hf_flux_norm, attack_norm, rms
-
-
-def _extract_reverb_subtracted_shot_features(
-    y: np.ndarray, sr: int, shot_t: float
-) -> Tuple[List[float], float]:
-    """
-    Extract a 16-dimensional Reverb-Subtracted acoustic feature vector and HF flux ratio
-    for a gunshot at timestamp `shot_t`:
-    - Subtracts the pre-shot reverberation spectrum [shot_t - 0.085s, shot_t - 0.015s]
-      from the transient shot window [shot_t - 0.012s, shot_t + 0.115s].
-    - Computes 12 reverb-subtracted MFCCs + spectral centroid + bandwidth + flatness + HF flux ratio.
-    """
-    start_idx = max(0, int((shot_t - 0.012) * sr))
-    end_idx = min(len(y), int((shot_t + 0.115) * sr))
     y_win = y[start_idx:end_idx]
-    if len(y_win) < 512:
-        y_win = np.pad(y_win, (0, 512 - len(y_win)))
-
-    # Pre-shot reverberation window immediately preceding the shot onset
-    pre_start = max(0, int((shot_t - 0.085) * sr))
-    pre_end = max(pre_start, int((shot_t - 0.015) * sr))
-    y_pre = y[pre_start:pre_end]
-
-    n_fft = 512
-    hop_length = 64
-    S_shot = np.abs(librosa.stft(y_win, n_fft=n_fft, hop_length=hop_length))
-
-    if len(y_pre) >= 256:
-        S_pre = np.abs(librosa.stft(y_pre, n_fft=n_fft, hop_length=hop_length))
-        reverb_profile = np.mean(S_pre, axis=1, keepdims=True)
-        S_clean = np.maximum(1e-7, S_shot - 0.85 * reverb_profile)
-    else:
-        S_clean = np.maximum(1e-7, S_shot)
-
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
-
-    # Compute High-Frequency Positive Flux Ratio (1.8 kHz - Nyquist vs Total Flux)
-    S_log = np.log1p(20.0 * S_clean)
-    pos_flux = np.maximum(0.0, np.diff(S_log, axis=1, prepend=S_log[:, :1]))
-    hf_mask = freqs >= 1800.0
-    hf_flux_sum = float(np.sum(pos_flux[hf_mask, :])) if np.any(hf_mask) else 0.0
-    total_flux_sum = float(np.sum(pos_flux)) + 1e-7
-    hf_flux_ratio = float(np.clip(hf_flux_sum / total_flux_sum, 0.0, 1.0))
-
-    # Compute 12 MFCCs from reverb-subtracted power spectrogram
-    power_clean = S_clean**2
-    mel_spec = librosa.feature.melspectrogram(S=power_clean, sr=sr, n_mels=32)
-    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel_spec + 1e-10), n_mfcc=12)
-    mfcc_mean = np.mean(mfcc, axis=1)
-
-    centroid = librosa.feature.spectral_centroid(S=S_clean, sr=sr, n_fft=n_fft)
-    bandwidth = librosa.feature.spectral_bandwidth(S=S_clean, sr=sr, n_fft=n_fft)
-    flatness = librosa.feature.spectral_flatness(S=S_clean)
-
-    raw_vec = np.concatenate(
-        [
-            mfcc_mean / 100.0,
-            [float(np.mean(centroid)) / (sr / 2.0)],
-            [float(np.mean(bandwidth)) / (sr / 2.0)],
-            [float(np.mean(flatness))],
-            [hf_flux_ratio],
-        ]
-    )
-    return _l2_normalize(raw_vec), round(hf_flux_ratio, 4)
+    return _extract_window_features(y_win, sr)
 
 
 def extract_beep_profile(
@@ -338,81 +243,120 @@ def extract_shot_profile(
     y: np.ndarray, sr: int, shot_timestamps: List[float]
 ) -> ShotProfile:
     """
-    Extract Dual-Regime ShotProfile (Isolated vs Rapid Follow-up reverb-subtracted features,
-    decay_rate, and hf_flux_ratio) across confirmed shots.
+    Extract ShotProfile using Google YAMNet local neural embeddings + acoustic features,
+    explicitly separating Slow Shots (>2000ms apart or first shot) and Fast Shots (<=2000ms apart).
     """
     if not shot_timestamps or len(y) == 0:
         return ShotProfile(
             decay_rate=150.0,
             features=[0.0] * 16,
-            isolated_features=[0.0] * 16,
-            followup_features=[0.0] * 16,
-            hf_flux_ratio=0.5,
+            slow_features=[0.0] * 16,
+            fast_features=[0.0] * 16,
+            neural_embedding=[0.0] * 64,
+            slow_neural_embedding=[0.0] * 64,
+            fast_neural_embedding=[0.0] * 64,
+            yamnet_gunshot_score=0.0,
         )
 
     sorted_shots = sorted(float(t) for t in shot_timestamps)
+    regimes: List[str] = []
+    for idx, shot_t in enumerate(sorted_shots):
+        # First shot or any shot > 2000ms (2.0s) after previous shot has a slow/uncompressed signature
+        if idx == 0 or (shot_t - sorted_shots[idx - 1]) > SLOW_SHOT_THRESHOLD_SEC:
+            regimes.append("slow")
+        else:
+            regimes.append("fast")
+
+    yamnet = YAMNetClassifier.get_instance()
+    neural_results = yamnet.analyze_windows(y, sr, sorted_shots, regimes=regimes)
+
     decay_rates: List[float] = []
-    all_vectors: List[List[float]] = []
-    isolated_vectors: List[List[float]] = []
-    followup_vectors: List[List[float]] = []
-    hf_ratios: List[float] = []
+    all_feat_16: List[List[float]] = []
+    slow_feat_16: List[List[float]] = []
+    fast_feat_16: List[List[float]] = []
+
+    all_emb_64: List[List[float]] = []
+    slow_emb_64: List[List[float]] = []
+    fast_emb_64: List[List[float]] = []
+    yamnet_scores: List[float] = []
 
     for idx, shot_t in enumerate(sorted_shots):
+        regime = regimes[idx]
         start_idx = max(0, int((shot_t - 0.015) * sr))
         end_idx = min(len(y), int((shot_t + 0.165) * sr))
         y_win = y[start_idx:end_idx]
-        if len(y_win) < 256:
-            continue
+        if len(y_win) >= 256:
+            decay_rates.append(_compute_shot_decay_rate(y_win, sr))
 
-        decay_rates.append(_compute_shot_decay_rate(y_win, sr))
-        feat, hf_ratio = _extract_reverb_subtracted_shot_features(y, sr, shot_t)
-        all_vectors.append(feat)
-        hf_ratios.append(hf_ratio)
-
-        # Classify into Isolated Regime (>0.85s or first shot) vs Rapid Follow-up Regime (<=0.85s)
-        if idx == 0 or (shot_t - sorted_shots[idx - 1]) > DUAL_REGIME_SPLIT_THRESHOLD:
-            isolated_vectors.append(feat)
+        feat_16 = _extract_regime_acoustic_features(y, sr, shot_t, regime)
+        all_feat_16.append(feat_16)
+        if regime == "slow":
+            slow_feat_16.append(feat_16)
         else:
-            followup_vectors.append(feat)
+            fast_feat_16.append(feat_16)
 
-    if not all_vectors:
-        return ShotProfile(
-            decay_rate=150.0,
-            features=[0.0] * 16,
-            isolated_features=[0.0] * 16,
-            followup_features=[0.0] * 16,
-            hf_flux_ratio=0.5,
-        )
+        if idx < len(neural_results):
+            n_res = neural_results[idx]
+            emb_64 = list(n_res["embedding_64d"])
+            all_emb_64.append(emb_64)
+            yamnet_scores.append(float(n_res["gunshot_prob"]))
+            if regime == "slow":
+                slow_emb_64.append(emb_64)
+            else:
+                fast_emb_64.append(emb_64)
 
-    avg_decay = round(float(np.mean(decay_rates)), 3)
-    avg_all = _l2_normalize(np.mean(np.asarray(all_vectors), axis=0))
-    avg_iso = (
-        _l2_normalize(np.mean(np.asarray(isolated_vectors), axis=0))
-        if isolated_vectors
-        else list(avg_all)
+    avg_decay = round(float(np.mean(decay_rates)), 3) if decay_rates else 150.0
+    avg_feat_all = _l2_normalize(np.mean(np.asarray(all_feat_16), axis=0))
+    avg_feat_slow = (
+        _l2_normalize(np.mean(np.asarray(slow_feat_16), axis=0))
+        if slow_feat_16
+        else list(avg_feat_all)
     )
-    avg_fol = (
-        _l2_normalize(np.mean(np.asarray(followup_vectors), axis=0))
-        if followup_vectors
-        else list(avg_all)
+    avg_feat_fast = (
+        _l2_normalize(np.mean(np.asarray(fast_feat_16), axis=0))
+        if fast_feat_16
+        else list(avg_feat_all)
     )
-    avg_hf = round(float(np.mean(hf_ratios)), 4) if hf_ratios else 0.5
+
+    avg_emb_all = (
+        _l2_normalize(np.mean(np.asarray(all_emb_64), axis=0))
+        if all_emb_64
+        else [0.0] * 64
+    )
+    avg_emb_slow = (
+        _l2_normalize(np.mean(np.asarray(slow_emb_64), axis=0))
+        if slow_emb_64
+        else list(avg_emb_all)
+    )
+    avg_emb_fast = (
+        _l2_normalize(np.mean(np.asarray(fast_emb_64), axis=0))
+        if fast_emb_64
+        else list(avg_emb_all)
+    )
+    avg_yamnet = round(float(np.mean(yamnet_scores)), 4) if yamnet_scores else 0.5
 
     return ShotProfile(
         decay_rate=avg_decay,
-        features=avg_all,
-        isolated_features=avg_iso,
-        followup_features=avg_fol,
-        hf_flux_ratio=avg_hf,
+        features=avg_feat_all,
+        slow_features=avg_feat_slow,
+        fast_features=avg_feat_fast,
+        neural_embedding=avg_emb_all,
+        slow_neural_embedding=avg_emb_slow,
+        fast_neural_embedding=avg_emb_fast,
+        yamnet_gunshot_score=avg_yamnet,
     )
 
 
-def _blend_feature_vectors(
-    existing_vec: List[float], new_vec: List[float], alpha: float
+def _blend_vectors(
+    existing_vec: List[float], new_vec: List[float], expected_len: int, alpha: float
 ) -> List[float]:
-    if not _has_nonzero_features(new_vec):
-        return existing_vec if len(existing_vec) == 16 else [0.0] * 16
-    if not _has_nonzero_features(existing_vec):
+    if not _has_nonzero_vec(new_vec, expected_len):
+        return (
+            existing_vec
+            if _has_nonzero_vec(existing_vec, expected_len)
+            else [0.0] * expected_len
+        )
+    if not _has_nonzero_vec(existing_vec, expected_len):
         return new_vec
     return _l2_normalize(
         (1.0 - alpha) * np.asarray(existing_vec) + alpha * np.asarray(new_vec)
@@ -427,7 +371,8 @@ def update_signature_profile(
     shot_timestamps: List[float],
 ) -> FirearmAudioSignature:
     """
-    Create or refine a Dual-Regime FirearmAudioSignature by averaging spectral characteristics (FR-2.4).
+    Create or refine a FirearmAudioSignature with Google YAMNet neural embeddings and
+    separate Slow (>2000ms) / Fast (<=2000ms) shot templates (FR-2.4).
     """
     y, sr = librosa.load(str(wav_path), sr=TARGET_SR, mono=True)
     new_beep = extract_beep_profile(y, sr, beep_timestamp)
@@ -443,11 +388,11 @@ def update_signature_profile(
             shot_profile=new_shot,
         )
 
-    alpha = 0.4  # Learning rate for refining profile with latest confirmed session
+    alpha = 0.4
 
-    # Blend BeepProfile if beep_timestamp was provided
-    if beep_timestamp is not None and _has_nonzero_features(new_beep.features):
-        if _has_nonzero_features(existing.beep_profile.features):
+    # Blend BeepProfile
+    if beep_timestamp is not None and _has_nonzero_vec(new_beep.features, 16):
+        if _has_nonzero_vec(existing.beep_profile.features, 16):
             blended_freq = round(
                 (1 - alpha) * existing.beep_profile.frequency_hz
                 + alpha * new_beep.frequency_hz,
@@ -459,8 +404,8 @@ def update_signature_profile(
                     + alpha * new_beep.duration_ms
                 )
             )
-            blended_beep_feat = _blend_feature_vectors(
-                existing.beep_profile.features, new_beep.features, alpha
+            blended_beep_feat = _blend_vectors(
+                existing.beep_profile.features, new_beep.features, 16, alpha
             )
             refined_beep = BeepProfile(
                 frequency_hz=blended_freq,
@@ -472,38 +417,55 @@ def update_signature_profile(
     else:
         refined_beep = existing.beep_profile
 
-    # Blend Dual-Regime ShotProfile if shot_timestamps were provided
-    if shot_timestamps and _has_nonzero_features(new_shot.features):
-        if _has_nonzero_features(existing.shot_profile.features):
+    # Blend ShotProfile (Slow >2000ms and Fast <=2000ms acoustic + YAMNet neural vectors)
+    if shot_timestamps and _has_nonzero_vec(new_shot.features, 16):
+        ex_shot = existing.shot_profile
+        if _has_nonzero_vec(ex_shot.features, 16):
             blended_decay = round(
-                (1 - alpha) * existing.shot_profile.decay_rate
-                + alpha * new_shot.decay_rate,
-                3,
+                (1 - alpha) * ex_shot.decay_rate + alpha * new_shot.decay_rate, 3
             )
-            blended_hf = round(
-                (1 - alpha) * getattr(existing.shot_profile, "hf_flux_ratio", 0.5)
-                + alpha * new_shot.hf_flux_ratio,
+            blended_yamnet = round(
+                (1 - alpha) * getattr(ex_shot, "yamnet_gunshot_score", 0.5)
+                + alpha * new_shot.yamnet_gunshot_score,
                 4,
             )
-            blended_all = _blend_feature_vectors(
-                existing.shot_profile.features, new_shot.features, alpha
-            )
-            blended_iso = _blend_feature_vectors(
-                existing.shot_profile.isolated_features or existing.shot_profile.features,
-                new_shot.isolated_features,
+            blended_feat = _blend_vectors(ex_shot.features, new_shot.features, 16, alpha)
+            blended_slow_feat = _blend_vectors(
+                ex_shot.slow_features or ex_shot.features,
+                new_shot.slow_features,
+                16,
                 alpha,
             )
-            blended_fol = _blend_feature_vectors(
-                existing.shot_profile.followup_features or existing.shot_profile.features,
-                new_shot.followup_features,
+            blended_fast_feat = _blend_vectors(
+                ex_shot.fast_features or ex_shot.features,
+                new_shot.fast_features,
+                16,
+                alpha,
+            )
+            blended_emb = _blend_vectors(
+                ex_shot.neural_embedding, new_shot.neural_embedding, 64, alpha
+            )
+            blended_slow_emb = _blend_vectors(
+                ex_shot.slow_neural_embedding or ex_shot.neural_embedding,
+                new_shot.slow_neural_embedding,
+                64,
+                alpha,
+            )
+            blended_fast_emb = _blend_vectors(
+                ex_shot.fast_neural_embedding or ex_shot.neural_embedding,
+                new_shot.fast_neural_embedding,
+                64,
                 alpha,
             )
             refined_shot = ShotProfile(
                 decay_rate=blended_decay,
-                features=blended_all,
-                isolated_features=blended_iso,
-                followup_features=blended_fol,
-                hf_flux_ratio=blended_hf,
+                features=blended_feat,
+                slow_features=blended_slow_feat,
+                fast_features=blended_fast_feat,
+                neural_embedding=blended_emb,
+                slow_neural_embedding=blended_slow_emb,
+                fast_neural_embedding=blended_fast_emb,
+                yamnet_gunshot_score=blended_yamnet,
             )
         else:
             refined_shot = new_shot
@@ -523,12 +485,16 @@ def detect_events_with_profile(
     wav_path: Path, signature: FirearmAudioSignature
 ) -> Tuple[Optional[float], List[float]]:
     """
-    Automated Dual-Regime peak detection and Reverb-Subtracted High-Frequency Flux
-    template matching using librosa (FR-2.3).
+    Automated Timer Beep & Gunshot detection combining:
+      1. Google YAMNet Local Neural Classification & 64-D Embeddings (ONNX Runtime)
+      2. Slow Shots (>2000ms apart / first shot) vs. Fast Shots (<=2000ms apart) signature matching
+      3. Librosa onset & spectral envelope analysis (FR-2.3)
     """
     y, sr = librosa.load(str(wav_path), sr=TARGET_SR, mono=True)
     if len(y) < sr * 0.2:
         return None, []
+
+    yamnet = YAMNetClassifier.get_instance()
 
     n_fft = 1024
     hop_length = 128
@@ -538,7 +504,7 @@ def detect_events_with_profile(
         S=S, n_fft=n_fft, hop_length=hop_length
     )[0]
 
-    # 1. Detect Timer Beep using narrowband frequency match + tonal purity
+    # 1. Detect Timer Beep using narrowband frequency match + tonal purity + YAMNet Beep verification
     target_freq = signature.beep_profile.frequency_hz or 3000.0
     beep_band = np.abs(freqs - target_freq) <= 350.0
     if not np.any(beep_band):
@@ -558,105 +524,206 @@ def detect_events_with_profile(
 
     beep_timestamp: Optional[float] = None
     if np.max(smoothed_tonal) > 1e-4:
-        peak_idx = int(np.argmax(smoothed_tonal))
-        threshold = 0.30 * smoothed_tonal[peak_idx]
-        onset_frame = peak_idx
-        while onset_frame > 0 and smoothed_tonal[onset_frame - 1] >= threshold:
-            onset_frame -= 1
-        beep_timestamp = round(
-            float(librosa.frames_to_time(onset_frame, sr=sr, hop_length=hop_length)), 3
+        # Evaluate top tonal peaks with YAMNet beep classifier + beep feature template
+        tonal_norm = smoothed_tonal / np.max(smoothed_tonal)
+        beep_peaks = librosa.util.peak_pick(
+            tonal_norm,
+            pre_max=5,
+            post_max=5,
+            pre_avg=10,
+            post_avg=10,
+            delta=0.20,
+            wait=int(0.25 * sr / hop_length),
         )
+        if len(beep_peaks) == 0:
+            beep_peaks = np.array([int(np.argmax(smoothed_tonal))])
 
-    # 2. Detect Gunshots using Reverb-Subtracted High-Frequency Flux + Dual-Regime Matching
-    hf_flux_norm, attack_norm, rms = _compute_reverb_subtracted_hf_flux(
-        y, sr, n_fft=512, hop_length=hop_length
-    )
+        cand_beep_times = []
+        cand_onset_frames = []
+        for bp in beep_peaks[:8]:
+            bp_idx = int(bp)
+            thresh = 0.30 * smoothed_tonal[bp_idx]
+            onset_f = bp_idx
+            while onset_f > 0 and smoothed_tonal[onset_f - 1] >= thresh:
+                onset_f -= 1
+            cand_onset_frames.append(onset_f)
+            cand_beep_times.append(
+                float(librosa.frames_to_time(onset_f, sr=sr, hop_length=hop_length))
+            )
+
+        beep_neural = yamnet.analyze_windows(
+            y, sr, cand_beep_times, regimes=["slow"] * len(cand_beep_times)
+        )
+        has_beep_feat = _has_nonzero_vec(signature.beep_profile.features, 16)
+
+        best_beep_score = -1.0
+        best_beep_time = cand_beep_times[0]
+        for idx, b_time in enumerate(cand_beep_times):
+            t_score = float(tonal_norm[int(beep_peaks[idx])])
+            n_beep = float(beep_neural[idx]["beep_prob"]) if idx < len(beep_neural) else 0.0
+            f_sim = 0.5
+            if has_beep_feat:
+                s_i = max(0, int((b_time - 0.02) * sr))
+                e_i = min(len(y), int((b_time + 0.35) * sr))
+                f_sim = _cosine_similarity(
+                    _extract_window_features(y[s_i:e_i], sr),
+                    signature.beep_profile.features,
+                )
+            combined_b = 0.55 * t_score + 0.30 * f_sim + 0.15 * n_beep
+            if combined_b > best_beep_score:
+                best_beep_score = combined_b
+                best_beep_time = b_time
+
+        beep_timestamp = round(float(best_beep_time), 3)
+
+    # 2. Propose Candidate Gunshots using RMS + Onset Envelope
+    rms = librosa.feature.rms(y=y, frame_length=512, hop_length=hop_length)[0]
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
-    if np.max(onset_env) > 1e-8:
-        onset_norm = onset_env / np.max(onset_env)
-    else:
-        onset_norm = onset_env
-
-    n_frames = min(len(hf_flux_norm), len(attack_norm), len(rms), len(onset_norm))
-    hf_flux_norm = hf_flux_norm[:n_frames]
-    attack_norm = attack_norm[:n_frames]
+    n_frames = min(len(rms), len(onset_env))
     rms = rms[:n_frames]
-    onset_norm = onset_norm[:n_frames]
+    onset_env = onset_env[:n_frames]
 
     rms_max = float(np.max(rms)) if len(rms) > 0 else 1.0
-    rms_norm = rms / max(rms_max, 1e-8)
-
-    # Composite transient score: combines Reverb-Subtracted HF Flux, Log-RMS Attack, and RMS/Onset
-    # Ensures both isolated shots AND rapid follow-up shots riding on reverb tails produce clear peaks
-    composite_env = rms_norm * (
-        0.50 * hf_flux_norm + 0.30 * attack_norm + 0.20 * onset_norm + 0.25
-    )
-    if np.max(composite_env) > 1e-8:
-        composite_env = composite_env / np.max(composite_env)
+    combined_env = rms * (onset_env + 0.5)
+    if np.max(combined_env) > 0:
+        combined_env = combined_env / np.max(combined_env)
 
     min_wait_frames = max(1, int(0.11 * sr / hop_length))
     peaks = librosa.util.peak_pick(
-        composite_env,
+        combined_env,
         pre_max=3,
         post_max=3,
-        pre_avg=6,
-        post_avg=6,
-        delta=0.09,
+        pre_avg=5,
+        post_avg=5,
+        delta=0.08,
         wait=min_wait_frames,
     )
 
-    shot_timestamps: List[float] = []
     min_shot_time = (beep_timestamp + 0.18) if beep_timestamp is not None else 0.05
-
-    iso_ref = (
-        signature.shot_profile.isolated_features
-        if _has_nonzero_features(signature.shot_profile.isolated_features)
-        else signature.shot_profile.features
-    )
-    fol_ref = (
-        signature.shot_profile.followup_features
-        if _has_nonzero_features(signature.shot_profile.followup_features)
-        else iso_ref
-    )
-    all_ref = signature.shot_profile.features
-    has_ref = _has_nonzero_features(all_ref) or _has_nonzero_features(iso_ref)
+    cand_frames: List[int] = []
+    cand_times: List[float] = []
 
     for p_frame in peaks:
         p_idx = int(p_frame)
-        cand_time = float(librosa.frames_to_time(p_idx, sr=sr, hop_length=hop_length))
-        if cand_time < min_shot_time:
+        cand_t = float(librosa.frames_to_time(p_idx, sr=sr, hop_length=hop_length))
+        if cand_t < min_shot_time:
             continue
-
-        if rms[p_idx] < 0.14 * rms_max:
+        if rms[p_idx] < 0.12 * rms_max:
             continue
+        cand_frames.append(p_idx)
+        cand_times.append(cand_t)
 
-        # Determine active regime based on time since previous detected shot
-        is_followup = (
-            len(shot_timestamps) > 0
-            and (cand_time - shot_timestamps[-1]) <= DUAL_REGIME_SPLIT_THRESHOLD
+    if not cand_times:
+        return beep_timestamp, []
+
+    # 3. Run Batched Google YAMNet Neural Inference for Slow (>2000ms) and Fast (<=2000ms) Windows
+    slow_neural_list = yamnet.analyze_windows(
+        y, sr, cand_times, regimes=["slow"] * len(cand_times)
+    )
+    fast_neural_list = yamnet.analyze_windows(
+        y, sr, cand_times, regimes=["fast"] * len(cand_times)
+    )
+
+    sp = signature.shot_profile
+    slow_feat_ref = (
+        sp.slow_features
+        if _has_nonzero_vec(sp.slow_features, 16)
+        else sp.features
+    )
+    fast_feat_ref = (
+        sp.fast_features
+        if _has_nonzero_vec(sp.fast_features, 16)
+        else slow_feat_ref
+    )
+    has_acoustic_ref = _has_nonzero_vec(slow_feat_ref, 16)
+
+    slow_emb_ref = (
+        sp.slow_neural_embedding
+        if _has_nonzero_vec(sp.slow_neural_embedding, 64)
+        else sp.neural_embedding
+    )
+    fast_emb_ref = (
+        sp.fast_neural_embedding
+        if _has_nonzero_vec(sp.fast_neural_embedding, 64)
+        else slow_emb_ref
+    )
+    has_neural_ref = _has_nonzero_vec(slow_emb_ref, 64)
+
+    shot_timestamps: List[float] = []
+
+    # 4. Sequential Slow (>2000ms) vs Fast (<=2000ms) Neural + Acoustic Evaluation
+    for idx, cand_time in enumerate(cand_times):
+        p_idx = cand_frames[idx]
+        cand_rms_ratio = float(rms[p_idx] / max(rms_max, 1e-8))
+
+        # Check time elapsed since last accepted shot (2000ms = 2.0s threshold)
+        delta_since_last = (
+            (cand_time - shot_timestamps[-1])
+            if len(shot_timestamps) > 0
+            else float("inf")
         )
+        is_slow_regime = delta_since_last > SLOW_SHOT_THRESHOLD_SEC
+        regime_name = "slow" if is_slow_regime else "fast"
 
-        if is_followup:
-            # In Rapid Follow-up Regime, verify there is a genuine HF Flux / Attack re-excitation
-            # (rejects passive room echo peaks that lack a high-frequency muzzle crack)
-            win_lo = max(0, p_idx - 2)
-            win_hi = min(n_frames, p_idx + 3)
-            local_hf_flux = float(np.max(hf_flux_norm[win_lo:win_hi]))
-            local_attack = float(np.max(attack_norm[win_lo:win_hi]))
-            if local_hf_flux < 0.08 and local_attack < 0.08:
+        n_info = slow_neural_list[idx] if is_slow_regime else fast_neural_list[idx]
+        gunshot_prob = max(
+            float(slow_neural_list[idx]["gunshot_prob"]),
+            float(fast_neural_list[idx]["gunshot_prob"]),
+        )
+        speech_prob = float(n_info["speech_prob"])
+        cand_emb_64 = list(n_info["embedding_64d"])
+
+        # Reject voice/speech chatter unless there is strong gunshot impulse probability
+        if speech_prob > 0.45 and gunshot_prob < 0.20:
+            continue
+
+        # Regime-specific amplitude threshold:
+        # Slow shots (>2000ms apart) have full uncompressed mic gain;
+        # Fast shots (<=2000ms apart) experience mic AGC compression.
+        min_rms_req = 0.16 if is_slow_regime else 0.12
+        if cand_rms_ratio < min_rms_req:
+            continue
+
+        # Acoustic similarity (16-D MFCC + spectral vector)
+        acoustic_sim = 0.5
+        if has_acoustic_ref:
+            cand_feat_16 = _extract_regime_acoustic_features(
+                y, sr, cand_time, regime_name
+            )
+            active_feat_ref = slow_feat_ref if is_slow_regime else fast_feat_ref
+            sim_reg = _cosine_similarity(cand_feat_16, active_feat_ref)
+            sim_all = _cosine_similarity(cand_feat_16, sp.features)
+            acoustic_sim = max(sim_reg, sim_all)
+
+        # Neural embedding similarity (64-D Google YAMNet embedding)
+        neural_sim = 0.5
+        if has_neural_ref:
+            active_emb_ref = slow_emb_ref if is_slow_regime else fast_emb_ref
+            sim_emb_reg = _cosine_similarity(cand_emb_64, active_emb_ref)
+            sim_emb_all = (
+                _cosine_similarity(cand_emb_64, sp.neural_embedding)
+                if _has_nonzero_vec(sp.neural_embedding, 64)
+                else sim_emb_reg
+            )
+            neural_sim = max(sim_emb_reg, sim_emb_all)
+
+        if has_neural_ref and has_acoustic_ref:
+            combined_score = (
+                0.45 * neural_sim
+                + 0.35 * acoustic_sim
+                + 0.20 * max(gunshot_prob, cand_rms_ratio)
+            )
+            min_score = 0.42 if is_slow_regime else 0.38
+            if combined_score < min_score or acoustic_sim < 0.32:
+                continue
+        elif has_acoustic_ref:
+            # Backward-compatible fallback for profiles trained before neural embedding storage
+            combined_score = 0.65 * acoustic_sim + 0.35 * max(gunshot_prob, cand_rms_ratio)
+            min_score = 0.40 if is_slow_regime else 0.36
+            if combined_score < min_score or acoustic_sim < 0.30:
                 continue
 
-        if has_ref:
-            cand_feat, _ = _extract_reverb_subtracted_shot_features(y, sr, cand_time)
-            active_ref = fol_ref if is_followup else iso_ref
-            sim_regime = _cosine_similarity(cand_feat, active_ref)
-            sim_global = _cosine_similarity(cand_feat, all_ref)
-            best_sim = max(sim_regime, sim_global)
-            min_sim_threshold = 0.28 if is_followup else 0.33
-            if best_sim < min_sim_threshold:
-                continue
-
-        # Refine to exact local transient peak around candidate onset
+        # Refine to exact local waveform peak around candidate onset
         local_start = max(0, int((cand_time - 0.02) * sr))
         local_end = min(len(y), int((cand_time + 0.04) * sr))
         if local_end > local_start:

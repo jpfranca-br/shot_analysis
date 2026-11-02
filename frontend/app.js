@@ -208,11 +208,13 @@ function renderFirearmManagerTable() {
       ? `<span class="status-badge badge-automated">Trained v${sig.signature_version}</span>`
       : `<span class="status-badge badge-training">Cold Start (v0)</span>`;
     const beepInfo = `${Number(sig.beep_profile.frequency_hz).toFixed(0)} Hz / ${sig.beep_profile.duration_ms} ms`;
-    const hfRatio =
-      sig.shot_profile.hf_flux_ratio !== undefined
-        ? `${Math.round(sig.shot_profile.hf_flux_ratio * 100)}% HF`
-        : "";
-    const shotInfo = `${Number(sig.shot_profile.decay_rate).toFixed(1)} dB/s${hfRatio ? ` • ${hfRatio}` : ""}`;
+    const hasNeural =
+      Array.isArray(sig.shot_profile.neural_embedding) &&
+      sig.shot_profile.neural_embedding.some((x) => Math.abs(x) > 1e-6);
+    const yamnetBadge = hasNeural
+      ? `YAMNet ${(Number(sig.shot_profile.yamnet_gunshot_score || 0) * 100).toFixed(0)}%`
+      : "YAMNet Ready";
+    const shotInfo = `${Number(sig.shot_profile.decay_rate).toFixed(1)} dB/s • ${yamnetBadge}`;
     const updatedDate = sig.updated_at
       ? new Date(sig.updated_at).toLocaleString()
       : "--";
@@ -439,16 +441,15 @@ function renderSignatureUI() {
   els.sigGunName.textContent = state.session.gun_name;
 
   if (state.signature) {
-    const hasDual =
-      Array.isArray(state.signature.shot_profile.followup_features) &&
-      state.signature.shot_profile.followup_features.some((x) => Math.abs(x) > 1e-6);
-    els.sigVersion.textContent = `v${state.signature.signature_version} (${hasDual ? "Dual-Regime" : "Trained"})`;
+    const hasNeural =
+      Array.isArray(state.signature.shot_profile.neural_embedding) &&
+      state.signature.shot_profile.neural_embedding.some((x) => Math.abs(x) > 1e-6);
+    els.sigVersion.textContent = `v${state.signature.signature_version} (${hasNeural ? "YAMNet + Slow/Fast" : "Trained"})`;
     els.sigBeepMeta.textContent = `${state.signature.beep_profile.frequency_hz.toFixed(0)} Hz / ${state.signature.beep_profile.duration_ms} ms`;
-    const hfPct =
-      state.signature.shot_profile.hf_flux_ratio !== undefined
-        ? ` • HF Flux ${Math.round(state.signature.shot_profile.hf_flux_ratio * 100)}%`
-        : "";
-    els.sigShotMeta.textContent = `${state.signature.shot_profile.decay_rate.toFixed(1)} dB/s${hfPct}`;
+    const yamnetText = hasNeural
+      ? ` • YAMNet ${(Number(state.signature.shot_profile.yamnet_gunshot_score || 0) * 100).toFixed(0)}%`
+      : " • YAMNet Active";
+    els.sigShotMeta.textContent = `${state.signature.shot_profile.decay_rate.toFixed(1)} dB/s${yamnetText}`;
     els.signatureBadge.textContent = `${state.session.gun_name} • Signature v${state.signature.signature_version}`;
     els.signatureBadge.className = "status-badge badge-automated";
   } else {

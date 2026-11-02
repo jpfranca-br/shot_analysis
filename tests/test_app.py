@@ -121,9 +121,12 @@ def test_full_workflow_cold_start_learning_automated_and_rendering(
     assert len(sig_v1["beep_profile"]["features"]) == 16
     assert sig_v1["shot_profile"]["decay_rate"] > 0
     assert len(sig_v1["shot_profile"]["features"]) == 16
-    assert len(sig_v1["shot_profile"]["isolated_features"]) == 16
-    assert len(sig_v1["shot_profile"]["followup_features"]) == 16
-    assert 0.0 <= sig_v1["shot_profile"]["hf_flux_ratio"] <= 1.0
+    assert len(sig_v1["shot_profile"]["slow_features"]) == 16
+    assert len(sig_v1["shot_profile"]["fast_features"]) == 16
+    assert len(sig_v1["shot_profile"]["neural_embedding"]) == 64
+    assert len(sig_v1["shot_profile"]["slow_neural_embedding"]) == 64
+    assert len(sig_v1["shot_profile"]["fast_neural_embedding"]) == 64
+    assert 0.0 <= sig_v1["shot_profile"]["yamnet_gunshot_score"] <= 1.0
 
     # Check Module 4 Analytics & Split Calculation (FR-4.1)
     analytics = ann_data["analytics"]
@@ -315,6 +318,48 @@ def test_default_firearms_and_crud_management(client: TestClient):
     assert restore_res.status_code == 200
     restored_names = [f["gun_name"] for f in restore_res.json()["firearms"]]
     assert "CBC 7022 .22LR" in restored_names
+
+
+def test_yamnet_slow_and_fast_shot_regimes(tmp_path: Path):
+    """Verify YAMNet + Slow (>2000ms) and Fast (<=2000ms) regime signature extraction and detection."""
+    from backend.audio_engine import (
+        detect_events_with_profile,
+        extract_normalized_mono_pcm,
+        update_signature_profile,
+    )
+
+    vid_path = tmp_path / "mixed_regime.mp4"
+    wav_path = tmp_path / "mixed_regime.wav"
+    # Shots: 1.80s (first = slow), 2.25s (+0.45s = fast <=2000ms), 4.50s (+2.25s = slow >2000ms)
+    expected_shots = [1.80, 2.25, 4.50]
+    generate_synthetic_practice_video(
+        output_mp4_path=vid_path,
+        duration_sec=5.5,
+        fps=30.0,
+        beep_time=0.80,
+        shot_times=expected_shots,
+    )
+    extract_normalized_mono_pcm(vid_path, wav_path)
+
+    sig = update_signature_profile(
+        existing=None,
+        gun_name="CZ P-10C 9mm",
+        wav_path=wav_path,
+        beep_timestamp=0.80,
+        shot_timestamps=expected_shots,
+    )
+    assert any(abs(x) > 1e-6 for x in sig.shot_profile.slow_features)
+    assert any(abs(x) > 1e-6 for x in sig.shot_profile.fast_features)
+    assert any(abs(x) > 1e-6 for x in sig.shot_profile.slow_neural_embedding)
+    assert any(abs(x) > 1e-6 for x in sig.shot_profile.fast_neural_embedding)
+    assert sig.shot_profile.slow_neural_embedding != sig.shot_profile.fast_neural_embedding
+
+    det_beep, det_shots = detect_events_with_profile(wav_path, sig)
+    assert det_beep is not None and abs(det_beep - 0.80) <= 0.12
+    assert len(det_shots) == 3
+    for pred, exp in zip(det_shots, expected_shots):
+        assert abs(pred - exp) <= 0.08
+
 
 
 

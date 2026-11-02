@@ -37,9 +37,12 @@ def _make_untrained_signature(
         shot_profile=ShotProfile(
             decay_rate=round(float(shot_decay_rate), 3),
             features=[0.0] * 16,
-            isolated_features=[0.0] * 16,
-            followup_features=[0.0] * 16,
-            hf_flux_ratio=0.5,
+            slow_features=[0.0] * 16,
+            fast_features=[0.0] * 16,
+            neural_embedding=[0.0] * 64,
+            slow_neural_embedding=[0.0] * 64,
+            fast_neural_embedding=[0.0] * 64,
+            yamnet_gunshot_score=0.0,
         ),
     )
 

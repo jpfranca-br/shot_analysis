@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 data/uploads/*
 data/outputs/*
+data/models/*.h5
+data/models/*.onnx
 data/sessions.json
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep
