@@ -17,7 +17,12 @@ from backend.audio_engine import (
 )
 from backend.config import AppConfig, load_config
 from backend.demo_generator import generate_synthetic_practice_video
-from backend.models import SessionAnnotationPayload, SessionRecord
+from backend.models import (
+    FirearmCreatePayload,
+    FirearmUpdatePayload,
+    SessionAnnotationPayload,
+    SessionRecord,
+)
 from backend.storage import StorageManager
 from backend.video_engine import render_annotated_video
 
@@ -104,14 +109,81 @@ def list_firearms(storage: StorageManager = Depends(get_storage)) -> Dict[str, A
     }
 
 
+@app.post("/api/firearms")
+def create_firearm_endpoint(
+    payload: FirearmCreatePayload,
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    cleaned = payload.gun_name.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Firearm name cannot be empty.")
+    sig = storage.create_firearm(
+        gun_name=cleaned,
+        beep_frequency_hz=payload.beep_frequency_hz,
+        beep_duration_ms=payload.beep_duration_ms,
+        shot_decay_rate=payload.shot_decay_rate,
+    )
+    return sig.model_dump()
+
+
+@app.post("/api/firearms/restore-defaults")
+def restore_default_firearms_endpoint(
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    signatures = storage.restore_default_firearms()
+    return {
+        "firearms": [sig.model_dump() for sig in signatures],
+    }
+
+
 @app.get("/api/firearms/{gun_name}")
 def get_firearm_signature(
     gun_name: str, storage: StorageManager = Depends(get_storage)
 ) -> Dict[str, Any]:
-    sig = storage.get_signature(gun_name)
+    sig = storage.get_signature(gun_name, include_untrained=True)
     if not sig:
         raise HTTPException(status_code=404, detail="Firearm signature not found")
     return sig.model_dump()
+
+
+@app.put("/api/firearms/{gun_name}")
+def update_firearm_endpoint(
+    gun_name: str,
+    payload: FirearmUpdatePayload,
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    updated = storage.update_firearm(
+        gun_name=gun_name,
+        new_gun_name=payload.new_gun_name,
+        beep_frequency_hz=payload.beep_frequency_hz,
+        beep_duration_ms=payload.beep_duration_ms,
+        shot_decay_rate=payload.shot_decay_rate,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Firearm not found")
+    return updated.model_dump()
+
+
+@app.post("/api/firearms/{gun_name}/reset")
+def reset_firearm_signature_endpoint(
+    gun_name: str,
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    reset_sig = storage.reset_signature(gun_name)
+    if not reset_sig:
+        raise HTTPException(status_code=404, detail="Firearm not found")
+    return reset_sig.model_dump()
+
+
+@app.delete("/api/firearms/{gun_name}")
+def delete_firearm_endpoint(
+    gun_name: str,
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    deleted = storage.delete_signature(gun_name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Firearm not found")
+    return {"deleted": True, "gun_name": gun_name}
 
 
 @app.post("/api/upload")

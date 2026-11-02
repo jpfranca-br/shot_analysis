@@ -64,6 +64,22 @@ const els = {
   processVideoBtn: document.getElementById("processVideoBtn"),
   downloadVideoLink: document.getElementById("downloadVideoLink"),
   statusToast: document.getElementById("statusToast"),
+  openFirearmManagerHeaderBtn: document.getElementById("openFirearmManagerHeaderBtn"),
+  openFirearmManagerInlineBtn: document.getElementById("openFirearmManagerInlineBtn"),
+  openFirearmManagerPanelBtn: document.getElementById("openFirearmManagerPanelBtn"),
+  firearmModal: document.getElementById("firearmModal"),
+  closeFirearmModalBtn: document.getElementById("closeFirearmModalBtn"),
+  firearmManageForm: document.getElementById("firearmManageForm"),
+  editOriginalGunName: document.getElementById("editOriginalGunName"),
+  manageGunNameInput: document.getElementById("manageGunNameInput"),
+  manageBeepFreqInput: document.getElementById("manageBeepFreqInput"),
+  manageBeepDurInput: document.getElementById("manageBeepDurInput"),
+  manageShotDecayInput: document.getElementById("manageShotDecayInput"),
+  saveFirearmModelBtn: document.getElementById("saveFirearmModelBtn"),
+  cancelEditFirearmBtn: document.getElementById("cancelEditFirearmBtn"),
+  firearmsManageTableBody: document.getElementById("firearmsManageTableBody"),
+  restoreDefaultsBtn: document.getElementById("restoreDefaultsBtn"),
+  modalFeedbackText: document.getElementById("modalFeedbackText"),
 };
 
 function showToast(message, isError = false) {
@@ -75,6 +91,12 @@ function showToast(message, isError = false) {
   els.statusToast.style.color = isError ? "#fca5a5" : "#bae6fd";
 }
 
+function showModalFeedback(message, isError = false) {
+  if (!els.modalFeedbackText) return;
+  els.modalFeedbackText.textContent = message;
+  els.modalFeedbackText.style.color = isError ? "#fca5a5" : "#34d399";
+}
+
 async function fetchFirearms() {
   try {
     const res = await fetch("/api/firearms");
@@ -82,22 +104,40 @@ async function fetchFirearms() {
     const data = await res.json();
     state.firearms = data.firearms || [];
 
-    // Ensure saved firearms appear in preset dropdown
-    const existingOptions = new Set(
-      Array.from(els.firearmPreset.options).map((o) => o.value.toLowerCase())
-    );
+    const currentTyped = els.firearmInput.value.trim();
+    els.firearmPreset.innerHTML = "";
+
     state.firearms.forEach((sig) => {
-      if (!existingOptions.has(sig.gun_name.toLowerCase())) {
-        const opt = document.createElement("option");
-        opt.value = sig.gun_name;
-        opt.textContent = `${sig.gun_name} (v${sig.signature_version})`;
-        els.firearmPreset.insertBefore(
-          opt,
-          els.firearmPreset.querySelector('option[value="__custom__"]')
-        );
-      }
+      const opt = document.createElement("option");
+      opt.value = sig.gun_name;
+      opt.textContent =
+        sig.signature_version > 0
+          ? `${sig.gun_name} (v${sig.signature_version})`
+          : `${sig.gun_name} (Cold Start)`;
+      els.firearmPreset.appendChild(opt);
     });
+
+    const customOpt = document.createElement("option");
+    customOpt.value = "__custom__";
+    customOpt.textContent = "+ Custom Firearm Name...";
+    els.firearmPreset.appendChild(customOpt);
+
+    // Match current input to dropdown option if present
+    const matched = state.firearms.find(
+      (f) => f.gun_name.toLowerCase() === currentTyped.toLowerCase()
+    );
+    if (matched) {
+      els.firearmPreset.value = matched.gun_name;
+      els.firearmInput.value = matched.gun_name;
+    } else if (state.firearms.length > 0 && !currentTyped) {
+      els.firearmPreset.value = state.firearms[0].gun_name;
+      els.firearmInput.value = state.firearms[0].gun_name;
+    } else {
+      els.firearmPreset.value = "__custom__";
+    }
+
     updateFirearmHint();
+    renderFirearmManagerTable();
   } catch (err) {
     console.error("Failed to fetch firearms:", err);
   }
@@ -118,13 +158,129 @@ function updateFirearmHint() {
     els.profileHint.textContent = "Please enter or select a firearm name.";
     return;
   }
-  if (sig) {
+  if (sig && sig.signature_version > 0) {
     els.profileHint.textContent = `✓ Existing Audio Signature found (v${sig.signature_version} • Beep ${Math.round(sig.beep_profile.frequency_hz)}Hz) — Automated Detection ready.`;
     els.profileHint.style.color = "#34d399";
   } else {
-    els.profileHint.textContent = `ℹ No profile for "${gun}" yet — will start in Training Mode (Cold Start).`;
+    els.profileHint.textContent = `ℹ No learned signature for "${gun}" yet — will start in Training Mode (Cold Start).`;
     els.profileHint.style.color = "#fbbf24";
   }
+}
+
+function resetFirearmModalForm() {
+  els.editOriginalGunName.value = "";
+  els.manageGunNameInput.value = "";
+  els.manageBeepFreqInput.value = "3000";
+  els.manageBeepDurInput.value = "220";
+  els.manageShotDecayInput.value = "120";
+  els.saveFirearmModelBtn.textContent = "+ Add Firearm";
+  els.cancelEditFirearmBtn.hidden = true;
+}
+
+function startEditingFirearm(sig) {
+  els.editOriginalGunName.value = sig.gun_name;
+  els.manageGunNameInput.value = sig.gun_name;
+  els.manageBeepFreqInput.value = Number(sig.beep_profile.frequency_hz).toFixed(2);
+  els.manageBeepDurInput.value = String(sig.beep_profile.duration_ms);
+  els.manageShotDecayInput.value = Number(sig.shot_profile.decay_rate).toFixed(1);
+  els.saveFirearmModelBtn.textContent = "💾 Save Changes";
+  els.cancelEditFirearmBtn.hidden = false;
+  els.manageGunNameInput.focus();
+  showModalFeedback(`Editing "${sig.gun_name}"...`);
+}
+
+function renderFirearmManagerTable() {
+  if (!els.firearmsManageTableBody) return;
+  els.firearmsManageTableBody.innerHTML = "";
+
+  if (!state.firearms || state.firearms.length === 0) {
+    els.firearmsManageTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="6">No firearms configured. Add one above or click Restore Default Firearms.</td>
+      </tr>`;
+    return;
+  }
+
+  state.firearms.forEach((sig) => {
+    const tr = document.createElement("tr");
+    const isTrained = sig.signature_version > 0;
+    const statusBadge = isTrained
+      ? `<span class="status-badge badge-automated">Trained v${sig.signature_version}</span>`
+      : `<span class="status-badge badge-training">Cold Start (v0)</span>`;
+    const beepInfo = `${Number(sig.beep_profile.frequency_hz).toFixed(0)} Hz / ${sig.beep_profile.duration_ms} ms`;
+    const shotInfo = `${Number(sig.shot_profile.decay_rate).toFixed(1)} dB/s`;
+    const updatedDate = sig.updated_at
+      ? new Date(sig.updated_at).toLocaleString()
+      : "--";
+
+    tr.innerHTML = `
+      <td><strong>${sig.gun_name}</strong></td>
+      <td>${statusBadge}</td>
+      <td>${beepInfo}</td>
+      <td>${shotInfo}</td>
+      <td style="font-size:0.75rem;color:var(--text-secondary)">${updatedDate}</td>
+      <td>
+        <div class="action-btn-group">
+          <button type="button" class="btn btn-xs btn-secondary" data-action="select">Use</button>
+          <button type="button" class="btn btn-xs btn-cyan" data-action="edit">✎ Edit</button>
+          <button type="button" class="btn btn-xs btn-amber" data-action="reset" ${!isTrained ? "disabled" : ""}>↺ Reset Signature</button>
+          <button type="button" class="btn btn-xs btn-danger" data-action="delete">🗑 Remove</button>
+        </div>
+      </td>
+    `;
+
+    tr.querySelector('[data-action="select"]').addEventListener("click", () => {
+      els.firearmInput.value = sig.gun_name;
+      els.firearmPreset.value = sig.gun_name;
+      updateFirearmHint();
+      els.firearmModal.hidden = true;
+      showToast(`Selected firearm "${sig.gun_name}".`);
+    });
+
+    tr.querySelector('[data-action="edit"]').addEventListener("click", () => {
+      startEditingFirearm(sig);
+    });
+
+    tr.querySelector('[data-action="reset"]').addEventListener("click", async () => {
+      try {
+        const res = await fetch(
+          `/api/firearms/${encodeURIComponent(sig.gun_name)}/reset`,
+          { method: "POST" }
+        );
+        if (!res.ok) throw new Error("Failed to reset signature");
+        await fetchFirearms();
+        if (
+          state.session &&
+          state.session.gun_name.toLowerCase() === sig.gun_name.toLowerCase()
+        ) {
+          state.signature = null;
+          renderSignatureUI();
+        }
+        showModalFeedback(`Reset acoustic signature for "${sig.gun_name}" to Cold Start.`);
+      } catch (err) {
+        showModalFeedback(err.message, true);
+      }
+    });
+
+    tr.querySelector('[data-action="delete"]').addEventListener("click", async () => {
+      try {
+        const res = await fetch(
+          `/api/firearms/${encodeURIComponent(sig.gun_name)}`,
+          { method: "DELETE" }
+        );
+        if (!res.ok) throw new Error("Failed to remove firearm");
+        if (els.editOriginalGunName.value === sig.gun_name) {
+          resetFirearmModalForm();
+        }
+        await fetchFirearms();
+        showModalFeedback(`Removed "${sig.gun_name}".`);
+      } catch (err) {
+        showModalFeedback(err.message, true);
+      }
+    });
+
+    els.firearmsManageTableBody.appendChild(tr);
+  });
 }
 
 // Compute client-side analytics (FR-4.1)
@@ -849,7 +1005,7 @@ function bindEvents() {
 
   // Load Sample Drill Video Button
   els.demoBtn.addEventListener("click", async () => {
-    const gunName = els.firearmInput.value.trim() || "Glock 19";
+    const gunName = els.firearmInput.value.trim() || "CZ P-10C 9mm";
     els.demoBtn.disabled = true;
     els.demoBtn.textContent = "⏳ Generating Sample Drill...";
 
@@ -915,6 +1071,131 @@ function bindEvents() {
   // Profile & Render Buttons
   els.saveProfileBtn.addEventListener("click", saveAndRefineProfile);
   els.processVideoBtn.addEventListener("click", processAndRenderVideo);
+
+  // Firearm Manager Modal Controls
+  const openModal = () => {
+    resetFirearmModalForm();
+    showModalFeedback("");
+    fetchFirearms();
+    els.firearmModal.hidden = false;
+  };
+
+  if (els.openFirearmManagerHeaderBtn) {
+    els.openFirearmManagerHeaderBtn.addEventListener("click", openModal);
+  }
+  if (els.openFirearmManagerInlineBtn) {
+    els.openFirearmManagerInlineBtn.addEventListener("click", openModal);
+  }
+  if (els.openFirearmManagerPanelBtn) {
+    els.openFirearmManagerPanelBtn.addEventListener("click", openModal);
+  }
+  if (els.closeFirearmModalBtn) {
+    els.closeFirearmModalBtn.addEventListener("click", () => {
+      els.firearmModal.hidden = true;
+    });
+  }
+  if (els.firearmModal) {
+    els.firearmModal.addEventListener("click", (e) => {
+      if (e.target === els.firearmModal) {
+        els.firearmModal.hidden = true;
+      }
+    });
+  }
+  if (els.cancelEditFirearmBtn) {
+    els.cancelEditFirearmBtn.addEventListener("click", () => {
+      resetFirearmModalForm();
+      showModalFeedback("");
+    });
+  }
+
+  if (els.firearmManageForm) {
+    els.firearmManageForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const origName = els.editOriginalGunName.value.trim();
+      const newName = els.manageGunNameInput.value.trim();
+      const beepFreq = parseFloat(els.manageBeepFreqInput.value) || 3000.0;
+      const beepDur = parseInt(els.manageBeepDurInput.value, 10) || 220;
+      const shotDecay = parseFloat(els.manageShotDecayInput.value) || 120.0;
+
+      if (!newName) {
+        showModalFeedback("Firearm name is required.", true);
+        return;
+      }
+
+      try {
+        if (origName) {
+          // Update existing firearm & signature parameters
+          const res = await fetch(
+            `/api/firearms/${encodeURIComponent(origName)}`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                new_gun_name: newName,
+                beep_frequency_hz: beepFreq,
+                beep_duration_ms: beepDur,
+                shot_decay_rate: shotDecay,
+              }),
+            }
+          );
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Failed to update firearm");
+          }
+          const updated = await res.json();
+          if (
+            els.firearmInput.value.trim().toLowerCase() ===
+            origName.toLowerCase()
+          ) {
+            els.firearmInput.value = updated.gun_name;
+          }
+          resetFirearmModalForm();
+          await fetchFirearms();
+          showModalFeedback(`✓ Updated "${updated.gun_name}".`);
+        } else {
+          // Create new firearm
+          const res = await fetch("/api/firearms", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              gun_name: newName,
+              beep_frequency_hz: beepFreq,
+              beep_duration_ms: beepDur,
+              shot_decay_rate: shotDecay,
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Failed to create firearm");
+          }
+          const created = await res.json();
+          els.firearmInput.value = created.gun_name;
+          resetFirearmModalForm();
+          await fetchFirearms();
+          showModalFeedback(`✓ Added firearm "${created.gun_name}".`);
+        }
+      } catch (err) {
+        showModalFeedback(err.message, true);
+      }
+    });
+  }
+
+  if (els.restoreDefaultsBtn) {
+    els.restoreDefaultsBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/firearms/restore-defaults", {
+          method: "POST",
+        });
+        if (!res.ok) throw new Error("Failed to restore defaults");
+        await fetchFirearms();
+        showModalFeedback(
+          "✓ Restored default firearms (CZ P-10C 9mm, T4 5.56x45mm, CBC 7022 .22LR)."
+        );
+      } catch (err) {
+        showModalFeedback(err.message, true);
+      }
+    });
+  }
 
   // Switch between Original Video and Rendered Overlay Preview
   els.viewOriginalBtn.addEventListener("click", () => {

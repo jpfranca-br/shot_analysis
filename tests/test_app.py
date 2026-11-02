@@ -256,3 +256,62 @@ def test_config_default_not_storing_videos(
     assert not (temp_storage.uploads_dir / f"{vid_2}.mp4").exists()
 
 
+def test_default_firearms_and_crud_management(client: TestClient):
+    """Verify default firearms (CZ P-10C 9mm, T4 5.56x45mm, CBC 7022 .22LR) and CRUD/reset endpoints."""
+    res = client.get("/api/firearms")
+    assert res.status_code == 200
+    names = [f["gun_name"] for f in res.json()["firearms"]]
+    assert "CZ P-10C 9mm" in names
+    assert "T4 5.56x45mm" in names
+    assert "CBC 7022 .22LR" in names
+
+    # Create a new firearm
+    create_res = client.post(
+        "/api/firearms",
+        json={
+            "gun_name": "Taurus G3C 9mm",
+            "beep_frequency_hz": 2850.0,
+            "beep_duration_ms": 250,
+            "shot_decay_rate": 110.5,
+        },
+    )
+    assert create_res.status_code == 200
+    created = create_res.json()
+    assert created["gun_name"] == "Taurus G3C 9mm"
+    assert created["beep_profile"]["frequency_hz"] == 2850.0
+
+    # Edit / Rename the firearm & update signature parameters
+    edit_res = client.put(
+        "/api/firearms/Taurus G3C 9mm",
+        json={
+            "new_gun_name": "Taurus G3 TORO 9mm",
+            "beep_frequency_hz": 3100.0,
+            "beep_duration_ms": 200,
+            "shot_decay_rate": 95.0,
+        },
+    )
+    assert edit_res.status_code == 200
+    edited = edit_res.json()
+    assert edited["gun_name"] == "Taurus G3 TORO 9mm"
+    assert edited["beep_profile"]["frequency_hz"] == 3100.0
+    assert edited["shot_profile"]["decay_rate"] == 95.0
+
+    # Reset signature
+    reset_res = client.post("/api/firearms/Taurus G3 TORO 9mm/reset")
+    assert reset_res.status_code == 200
+    assert reset_res.json()["signature_version"] == 0
+
+    # Delete firearm
+    del_res = client.delete("/api/firearms/Taurus G3 TORO 9mm")
+    assert del_res.status_code == 200
+    assert del_res.json()["deleted"] is True
+
+    # Delete a default firearm and then restore defaults
+    client.delete("/api/firearms/CBC 7022 .22LR")
+    restore_res = client.post("/api/firearms/restore-defaults")
+    assert restore_res.status_code == 200
+    restored_names = [f["gun_name"] for f in restore_res.json()["firearms"]]
+    assert "CBC 7022 .22LR" in restored_names
+
+
+

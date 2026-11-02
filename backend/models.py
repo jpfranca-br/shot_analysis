@@ -24,6 +24,20 @@ class FirearmAudioSignature(BaseModel):
     shot_profile: ShotProfile
 
 
+class FirearmCreatePayload(BaseModel):
+    gun_name: str
+    beep_frequency_hz: float = 3000.0
+    beep_duration_ms: int = 220
+    shot_decay_rate: float = 120.0
+
+
+class FirearmUpdatePayload(BaseModel):
+    new_gun_name: Optional[str] = None
+    beep_frequency_hz: Optional[float] = None
+    beep_duration_ms: Optional[int] = None
+    shot_decay_rate: Optional[float] = None
+
+
 class SessionAnnotationPayload(BaseModel):
     video_id: str
     gun_name: str

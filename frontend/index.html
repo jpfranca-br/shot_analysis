@@ -23,6 +23,9 @@
       </div>
 
       <div class="header-badges">
+        <button type="button" id="openFirearmManagerHeaderBtn" class="btn btn-secondary btn-sm">
+          ⚙ Manage Firearms &amp; Signatures
+        </button>
         <div id="modeBadge" class="status-badge badge-neutral">Awaiting Video Upload</div>
         <div id="signatureBadge" class="status-badge badge-outline">No Profile Loaded</div>
       </div>
@@ -41,22 +44,25 @@
 
           <form id="uploadForm" class="upload-form">
             <div class="form-group">
-              <label for="firearmPreset">Select Firearm Model</label>
+              <div class="label-with-action">
+                <label for="firearmPreset">Select Firearm Model</label>
+                <button type="button" id="openFirearmManagerInlineBtn" class="link-btn">
+                  Manage Models
+                </button>
+              </div>
               <div class="firearm-input-row">
                 <select id="firearmPreset" aria-label="Firearm Preset">
-                  <option value="Glock 19">Glock 19</option>
-                  <option value="Sig P320">Sig P320</option>
-                  <option value="CZ Shadow 2">CZ Shadow 2</option>
-                  <option value="Staccato P">Staccato P</option>
-                  <option value="Smith & Wesson M&P9">Smith &amp; Wesson M&amp;P9</option>
+                  <option value="CZ P-10C 9mm">CZ P-10C 9mm</option>
+                  <option value="T4 5.56x45mm">T4 5.56x45mm</option>
+                  <option value="CBC 7022 .22LR">CBC 7022 .22LR</option>
                   <option value="__custom__">+ Custom Firearm Name...</option>
                 </select>
                 <input
                   type="text"
                   id="firearmInput"
                   name="gun_name"
-                  value="Glock 19"
-                  placeholder="Enter firearm model (e.g., Glock 19)"
+                  value="CZ P-10C 9mm"
+                  placeholder="Enter firearm model (e.g., CZ P-10C 9mm)"
                   required
                 />
               </div>
@@ -264,6 +270,9 @@
             <button type="button" id="saveProfileBtn" class="btn btn-secondary btn-full" disabled>
               Confirm Markers &amp; Refine Audio Profile
             </button>
+            <button type="button" id="openFirearmManagerPanelBtn" class="btn btn-secondary btn-full">
+              ⚙ Manage Firearms &amp; Signature Models
+            </button>
           </div>
         </div>
 
@@ -298,6 +307,101 @@
         </div>
       </aside>
     </main>
+  </div>
+
+  <!-- Firearm & Signature Model Manager Modal -->
+  <div id="firearmModal" class="modal-backdrop" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="firearmModalTitle">
+      <div class="modal-header">
+        <div>
+          <h2 id="firearmModalTitle">Manage Firearms &amp; Signature Models</h2>
+          <p class="panel-subtext">Add, rename, edit acoustic parameters, reset learned profiles, or delete firearms.</p>
+        </div>
+        <button type="button" id="closeFirearmModalBtn" class="btn btn-xs btn-danger">✕ Close</button>
+      </div>
+
+      <!-- Add / Edit Form inside Modal -->
+      <form id="firearmManageForm" class="firearm-manage-form">
+        <input type="hidden" id="editOriginalGunName" value="" />
+        <div class="manage-form-grid">
+          <div class="form-group">
+            <label for="manageGunNameInput">Firearm Name</label>
+            <input
+              type="text"
+              id="manageGunNameInput"
+              placeholder="e.g., CZ P-10C 9mm"
+              required
+            />
+          </div>
+          <div class="form-group">
+            <label for="manageBeepFreqInput">Beep Freq (Hz)</label>
+            <input
+              type="number"
+              step="0.01"
+              id="manageBeepFreqInput"
+              value="3000"
+              required
+            />
+          </div>
+          <div class="form-group">
+            <label for="manageBeepDurInput">Beep Duration (ms)</label>
+            <input
+              type="number"
+              step="1"
+              id="manageBeepDurInput"
+              value="220"
+              required
+            />
+          </div>
+          <div class="form-group">
+            <label for="manageShotDecayInput">Shot Decay (dB/s)</label>
+            <input
+              type="number"
+              step="0.1"
+              id="manageShotDecayInput"
+              value="120"
+              required
+            />
+          </div>
+          <div class="manage-form-buttons">
+            <button type="submit" id="saveFirearmModelBtn" class="btn btn-primary">
+              + Add Firearm
+            </button>
+            <button type="button" id="cancelEditFirearmBtn" class="btn btn-secondary" hidden>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </form>
+
+      <!-- Firearms Table -->
+      <div class="modal-table-wrapper">
+        <table class="splits-table firearms-table">
+          <thead>
+            <tr>
+              <th>Firearm Model</th>
+              <th>Signature Status</th>
+              <th>Beep Profile</th>
+              <th>Shot Decay</th>
+              <th>Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="firearmsManageTableBody">
+            <tr class="empty-row">
+              <td colspan="6">Loading firearms...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="restoreDefaultsBtn" class="btn btn-secondary btn-xs">
+          ↺ Restore Default Firearms (CZ P-10C 9mm, T4 5.56x45mm, CBC 7022 .22LR)
+        </button>
+        <span id="modalFeedbackText" class="field-hint"></span>
+      </div>
+    </div>
   </div>
 
   <script src="/app.js"></script>
