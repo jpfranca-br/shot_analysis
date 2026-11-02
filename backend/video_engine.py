@@ -61,24 +61,40 @@ def render_annotated_video(
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps <= 1.0 or fps > 240.0:
         fps = 30.0
+    # Use a clean constant output frame rate (e.g. 30.0 fps for ~29-30fps VFR clips)
+    out_fps = 30.0 if 23.0 <= fps <= 31.0 else round(float(fps), 2)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
 
     temp_raw_mp4 = output_video_path.with_suffix(".cv2_raw.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(temp_raw_mp4), fourcc, fps, (width, height))
+    writer = cv2.VideoWriter(str(temp_raw_mp4), fourcc, out_fps, (width, height))
 
     font = cv2.FONT_HERSHEY_DUPLEX
     scale_factor = max(0.55, min(1.3, width / 1000.0))
 
-    frame_idx = 0
+    src_frame_idx = 0
+    written_frames = 0
+    prev_pts = 0.0
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        t = frame_idx / fps
-        frame_idx += 1
+        # Read true container presentation timestamp (handles Variable Frame Rate phone videos)
+        pts_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+        if src_frame_idx == 0:
+            t = 0.0
+        elif pts_msec and pts_msec > 0:
+            t = pts_msec / 1000.0
+            if t <= prev_pts:
+                t = prev_pts + (1.0 / out_fps)
+        else:
+            t = prev_pts + (1.0 / out_fps)
+
+        prev_pts = t
+        src_frame_idx += 1
 
         # 1. Persistent Top-Left Header Bar (Firearm & Stage Timer)
         pad = int(16 * scale_factor)
@@ -286,12 +302,17 @@ def render_annotated_video(
                     cv2.LINE_AA,
                 )
 
-        writer.write(frame)
+        # Write frame(s) to CFR output writer so output timestamp matches source VFR PTS
+        target_cfr_idx = int(round(t * out_fps))
+        repeats = max(1, min(15, target_cfr_idx - written_frames + 1))
+        for _ in range(repeats):
+            writer.write(frame)
+            written_frames += 1
 
     cap.release()
     writer.release()
 
-    # Remux with original audio and transcode to H.264 MP4 for universal browser playback
+    # Remux with original audio (aligned to first_pts=0) and transcode to H.264 MP4
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [
         ffmpeg_exe,
@@ -310,8 +331,12 @@ def render_annotated_video(
         "fast",
         "-pix_fmt",
         "yuv420p",
+        "-af",
+        "aresample=async=1:first_pts=0",
         "-c:a",
         "aac",
+        "-b:a",
+        "192k",
         "-shortest",
         str(output_video_path),
     ]

@@ -28,6 +28,8 @@ def extract_normalized_mono_pcm(video_path: Path, output_wav_path: Path) -> floa
         "-i",
         str(video_path),
         "-vn",
+        "-af",
+        "aresample=async=1:first_pts=0",
         "-ac",
         "1",
         "-ar",
