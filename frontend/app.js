@@ -479,6 +479,7 @@ async function initWaveSurfer(session) {
   els.waveformContainer.innerHTML = "";
   els.zoomSlider.value = "0";
   els.videoPlaceholder.hidden = true;
+  els.videoPlaceholder.style.display = "none";
   els.practiceVideo.src = session.video_url;
   els.practiceVideo.load();
 
@@ -516,6 +517,7 @@ async function initWaveSurfer(session) {
     autoScroll: true,
     autoCenter: false,
     media: els.practiceVideo,
+    url: session.video_url,
     plugins: [regions, timeline],
   };
 
