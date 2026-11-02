@@ -4,5 +4,6 @@ __pycache__/
 .pytest_cache/
 data/uploads/*
 data/outputs/*
+data/sessions.json
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep

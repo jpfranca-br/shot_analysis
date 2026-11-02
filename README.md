@@ -36,11 +36,12 @@ shot_analysis/
 ├── backend/
 │   ├── __init__.py
 │   ├── main.py             # FastAPI application & REST endpoints
+│   ├── config.py           # Storage configuration loader (config.json & env vars)
 │   ├── models.py           # Pydantic data schemas (FirearmAudioSignature, SessionAnnotationPayload)
 │   ├── storage.py          # Thread-safe local JSON store for signatures & sessions
 │   ├── audio_engine.py     # Normalized mono PCM extraction, librosa feature learning & peak detection
 │   ├── analytics.py        # Draw time, split time, and stage time computation
-│   ├── video_engine.py     # OpenCV burnt-in HUD overlay renderer & H.264/AAC remuxer
+│   ├── video_engine.py     # OpenCV burnt-in HUD overlay renderer & VFR-synced H.264/AAC remuxer
 │   └── demo_generator.py   # Synthetic shooting practice video generator for instant testing
 ├── frontend/
 │   ├── index.html          # Single-page application layout
@@ -63,7 +64,7 @@ By default, **uploaded and rendered videos are not permanently stored on the ser
 - Temporary media files for the active session are automatically deleted when a new video is uploaded, when the server starts or stops, or when `/api/cleanup` is called.
 - Learned firearm acoustic signatures (`data/signatures.json`) are always preserved.
 
-You can customize this behavior in [`config.json`](file:///c:/Users/JPFranca/Desktop/signature/config.json):
+You can customize this behavior in [`config.json`](./config.json):
 
 ```json
 {
@@ -130,7 +131,7 @@ Upgrade `pip` and install the required packages from `requirements.txt`:
 
 ```bash
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ---
