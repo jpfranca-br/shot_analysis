@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
 import uuid
@@ -14,6 +15,7 @@ from backend.audio_engine import (
     extract_normalized_mono_pcm,
     update_signature_profile,
 )
+from backend.config import AppConfig, load_config
 from backend.demo_generator import generate_synthetic_practice_video
 from backend.models import SessionAnnotationPayload, SessionRecord
 from backend.storage import StorageManager
@@ -21,10 +23,36 @@ from backend.video_engine import render_annotated_video
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm"}
 
+
+def get_storage() -> StorageManager:
+    return StorageManager()
+
+
+def get_app_config() -> AppConfig:
+    return load_config()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    cfg = load_config()
+    storage = StorageManager()
+    storage.cleanup_videos(
+        keep_uploaded=cfg.keep_uploaded,
+        keep_rendered=cfg.keep_rendered,
+    )
+    yield
+    cfg_exit = load_config()
+    storage.cleanup_videos(
+        keep_uploaded=cfg_exit.keep_uploaded,
+        keep_rendered=cfg_exit.keep_rendered,
+    )
+
+
 app = FastAPI(
     title="Shooting Practice Video Analyzer",
     description="Audio signature learning, interactive waveform annotation, split timing, and OpenCV video overlay analyzer.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -36,13 +64,36 @@ app.add_middleware(
 )
 
 
-def get_storage() -> StorageManager:
-    return StorageManager()
-
-
 @app.get("/api/health")
 def health_check() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/config")
+def get_config_endpoint(
+    cfg: AppConfig = Depends(get_app_config),
+) -> Dict[str, Any]:
+    return {
+        "store_videos": cfg.store_videos,
+        "store_uploaded_videos": cfg.keep_uploaded,
+        "store_rendered_videos": cfg.keep_rendered,
+    }
+
+
+@app.post("/api/cleanup")
+def cleanup_ephemeral_videos(
+    storage: StorageManager = Depends(get_storage),
+    cfg: AppConfig = Depends(get_app_config),
+) -> Dict[str, Any]:
+    deleted = storage.cleanup_videos(
+        keep_uploaded=cfg.keep_uploaded,
+        keep_rendered=cfg.keep_rendered,
+    )
+    return {
+        "deleted_files": deleted,
+        "keep_uploaded": cfg.keep_uploaded,
+        "keep_rendered": cfg.keep_rendered,
+    }
 
 
 @app.get("/api/firearms")
@@ -68,6 +119,7 @@ async def upload_video(
     video: UploadFile = File(...),
     gun_name: str = Form(...),
     storage: StorageManager = Depends(get_storage),
+    cfg: AppConfig = Depends(get_app_config),
 ) -> Dict[str, Any]:
     cleaned_gun = gun_name.strip()
     if not cleaned_gun:
@@ -80,6 +132,12 @@ async def upload_video(
             status_code=400,
             detail=f"Unsupported video format '{ext}'. Supported formats: .mp4, .mov, .webm (FR-1.1).",
         )
+
+    # Purge previous sessions' videos if config.json specifies not to store videos
+    storage.cleanup_videos(
+        keep_uploaded=cfg.keep_uploaded,
+        keep_rendered=cfg.keep_rendered,
+    )
 
     video_id = uuid.uuid4().hex[:12]
     saved_video_name = f"{video_id}{ext}"
@@ -137,8 +195,13 @@ async def upload_video(
 def create_demo_session(
     gun_name: str = Form("Glock 19"),
     storage: StorageManager = Depends(get_storage),
+    cfg: AppConfig = Depends(get_app_config),
 ) -> Dict[str, Any]:
     """Generate and ingest a sample shooting practice video for rapid demonstration."""
+    storage.cleanup_videos(
+        keep_uploaded=cfg.keep_uploaded,
+        keep_rendered=cfg.keep_rendered,
+    )
     cleaned_gun = gun_name.strip() or "Glock 19"
     video_id = uuid.uuid4().hex[:12]
     saved_video_name = f"{video_id}.mp4"

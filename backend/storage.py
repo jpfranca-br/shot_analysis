@@ -106,3 +106,57 @@ class StorageManager:
             except json.JSONDecodeError:
                 raw = {}
             return [SessionRecord(**val) for val in raw.values()]
+
+    def cleanup_videos(
+        self,
+        keep_uploaded: bool = False,
+        keep_rendered: bool = False,
+        exclude_video_id: Optional[str] = None,
+    ) -> int:
+        """
+        Delete uploaded and/or rendered video files when storage is disabled in config.json.
+        Preserves firearm audio signatures (signatures.json).
+        Returns the number of deleted files.
+        """
+        deleted_count = 0
+        with self._lock:
+            self.ensure_dirs()
+            if not keep_uploaded:
+                for p in self.uploads_dir.iterdir():
+                    if not p.is_file() or p.name == ".gitkeep":
+                        continue
+                    if exclude_video_id and p.name.startswith(exclude_video_id):
+                        continue
+                    try:
+                        p.unlink(missing_ok=True)
+                        deleted_count += 1
+                    except OSError:
+                        pass
+
+            if not keep_rendered:
+                for p in self.outputs_dir.iterdir():
+                    if not p.is_file() or p.name == ".gitkeep":
+                        continue
+                    if exclude_video_id and p.name.startswith(exclude_video_id):
+                        continue
+                    try:
+                        p.unlink(missing_ok=True)
+                        deleted_count += 1
+                    except OSError:
+                        pass
+
+            if not keep_uploaded and not keep_rendered:
+                try:
+                    raw = json.loads(self.sessions_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    raw = {}
+                if exclude_video_id and exclude_video_id in raw:
+                    new_raw = {exclude_video_id: raw[exclude_video_id]}
+                else:
+                    new_raw = {}
+                self.sessions_path.write_text(
+                    json.dumps(new_raw, indent=2), encoding="utf-8"
+                )
+
+        return deleted_count
+

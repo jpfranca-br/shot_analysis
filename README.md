@@ -49,10 +49,33 @@ shot_analysis/
 ├── tests/
 │   └── test_app.py         # End-to-end automated pytest suite
 ├── functional_specification.md
+├── config.json             # Storage configuration (default: do not store videos)
 ├── requirements.txt
 ├── pytest.ini
 └── README.md
 ```
+
+---
+
+## Configuration (`config.json`)
+
+By default, **uploaded and rendered videos are not permanently stored on the server** (`"store_videos": false`).
+- Temporary media files for the active session are automatically deleted when a new video is uploaded, when the server starts or stops, or when `/api/cleanup` is called.
+- Learned firearm acoustic signatures (`data/signatures.json`) are always preserved.
+
+You can customize this behavior in [`config.json`](file:///c:/Users/JPFranca/Desktop/signature/config.json):
+
+```json
+{
+  "store_videos": false,
+  "store_uploaded_videos": false,
+  "store_rendered_videos": false
+}
+```
+
+- Set `"store_videos": true` to keep both uploaded and rendered videos on the server (`data/uploads/` and `data/outputs/`).
+- Or toggle `"store_uploaded_videos"` and `"store_rendered_videos"` individually.
+- You can also override this at runtime with the environment variable `ANALYZER_STORE_VIDEOS=true`.
 
 ---
 

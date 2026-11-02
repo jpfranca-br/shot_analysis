@@ -226,3 +226,33 @@ def test_multiple_firearms_and_frontend_serving(
     names = [f["gun_name"] for f in list_res.json()["firearms"]]
     assert "Sig P320" in names
 
+
+def test_config_default_not_storing_videos(
+    client: TestClient,
+    temp_storage: StorageManager,
+):
+    """Verify config.json defaults to not storing videos and cleans up previous session files."""
+    cfg_res = client.get("/api/config")
+    assert cfg_res.status_code == 200
+    cfg_data = cfg_res.json()
+    assert cfg_data["store_videos"] is False
+    assert cfg_data["store_uploaded_videos"] is False
+    assert cfg_data["store_rendered_videos"] is False
+
+    # Create first demo session
+    r1 = client.post("/api/demo-upload", data={"gun_name": "Glock 19"})
+    vid_1 = r1.json()["session"]["video_id"]
+    assert (temp_storage.uploads_dir / f"{vid_1}.mp4").exists()
+
+    # Create second demo session -> first session's uploaded video must be deleted automatically
+    r2 = client.post("/api/demo-upload", data={"gun_name": "Glock 19"})
+    vid_2 = r2.json()["session"]["video_id"]
+    assert not (temp_storage.uploads_dir / f"{vid_1}.mp4").exists()
+    assert (temp_storage.uploads_dir / f"{vid_2}.mp4").exists()
+
+    # Calling /api/cleanup deletes remaining temporary videos
+    cleanup_res = client.post("/api/cleanup")
+    assert cleanup_res.status_code == 200
+    assert not (temp_storage.uploads_dir / f"{vid_2}.mp4").exists()
+
+
