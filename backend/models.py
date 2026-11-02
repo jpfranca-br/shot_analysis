@@ -20,21 +20,25 @@ class ShotProfile(BaseModel):
         default_factory=list,
         description="16-D acoustic feature vector for fast follow-up shots (<=2000ms apart)",
     )
-    neural_embedding: List[float] = Field(
+    video_features: List[float] = Field(
         default_factory=list,
-        description="Combined 64-D Google YAMNet neural embedding vector",
+        description="6-D visual recoil, motion jerk, blur shock, and muzzle flash feature vector",
     )
-    slow_neural_embedding: List[float] = Field(
-        default_factory=list,
-        description="64-D Google YAMNet neural embedding for slow shots (>2000ms apart or first shot)",
+    trained_videos_count: int = Field(
+        default=0,
+        description="Number of annotated videos used to train this firearm's multimodal classifier",
     )
-    fast_neural_embedding: List[float] = Field(
-        default_factory=list,
-        description="64-D Google YAMNet neural embedding for fast shots (<=2000ms apart)",
+    positive_shots_count: int = Field(
+        default=0,
+        description="Total confirmed positive shot examples harvested for this firearm",
     )
-    yamnet_gunshot_score: float = Field(
-        default=0.0,
-        description="Mean Google YAMNet AudioSet gunshot probability for this firearm",
+    hard_negatives_count: int = Field(
+        default=0,
+        description="Total hard negative (reverb/chatter/noise) examples harvested for this firearm",
+    )
+    cv_f1_score: Optional[float] = Field(
+        default=None,
+        description="Cross-validation F1 accuracy score across trained videos (0.0 to 1.0)",
     )
 
 
@@ -70,6 +74,30 @@ class SessionAnnotationPayload(BaseModel):
     user_modified: bool = False
 
 
+class SessionCheckPayload(BaseModel):
+    video_id: str
+    gun_name: str
+    ground_truth_beep: Optional[float] = None
+    ground_truth_shots: List[float] = Field(default_factory=list)
+    predicted_beep: Optional[float] = None
+    predicted_shots: Optional[List[float]] = None
+
+
+class SessionCheckResult(BaseModel):
+    gun_name: str
+    signature_version: int
+    beep_error_ms: Optional[float] = None
+    precision: float
+    recall: float
+    f1_score: float
+    mean_shot_error_ms: Optional[float] = None
+    matched_shots: int
+    missed_shots: int
+    false_positives: int
+    total_ground_truth_shots: int
+    total_predicted_shots: int
+
+
 class ShotMetricItem(BaseModel):
     shot_number: int
     timestamp: float
@@ -96,6 +124,8 @@ class SessionRecord(BaseModel):
     signature_version: Optional[int] = None
     beep_timestamp: Optional[float] = None
     shot_timestamps: List[float] = Field(default_factory=list)
+    predicted_beep: Optional[float] = None
+    predicted_shots: List[float] = Field(default_factory=list)
     user_modified: bool = False
     rendered_video_url: Optional[str] = None
     created_at: str = Field(

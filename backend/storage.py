@@ -11,6 +11,7 @@ from backend.models import (
     SessionRecord,
     ShotProfile,
 )
+from backend.multimodal_detector import clear_firearm_training_dataset
 
 DEFAULT_FIREARMS: List[str] = [
     "CZ P-10C 9mm",
@@ -39,10 +40,11 @@ def _make_untrained_signature(
             features=[0.0] * 16,
             slow_features=[0.0] * 16,
             fast_features=[0.0] * 16,
-            neural_embedding=[0.0] * 64,
-            slow_neural_embedding=[0.0] * 64,
-            fast_neural_embedding=[0.0] * 64,
-            yamnet_gunshot_score=0.0,
+            video_features=[0.0] * 6,
+            trained_videos_count=0,
+            positive_shots_count=0,
+            hard_negatives_count=0,
+            cv_f1_score=None,
         ),
     )
 
@@ -205,6 +207,7 @@ class StorageManager:
             if key not in raw:
                 return None
             existing = FirearmAudioSignature(**raw[key])
+            clear_firearm_training_dataset(self.base_dir, existing.gun_name)
             reset_sig = _make_untrained_signature(existing.gun_name)
             raw[key] = reset_sig.model_dump()
             self.signatures_path.write_text(
@@ -222,6 +225,7 @@ class StorageManager:
                 raw = {}
             if key not in raw:
                 return False
+            clear_firearm_training_dataset(self.base_dir, gun_name)
             del raw[key]
             self.signatures_path.write_text(
                 json.dumps(raw, indent=2), encoding="utf-8"

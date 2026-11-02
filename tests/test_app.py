@@ -123,10 +123,9 @@ def test_full_workflow_cold_start_learning_automated_and_rendering(
     assert len(sig_v1["shot_profile"]["features"]) == 16
     assert len(sig_v1["shot_profile"]["slow_features"]) == 16
     assert len(sig_v1["shot_profile"]["fast_features"]) == 16
-    assert len(sig_v1["shot_profile"]["neural_embedding"]) == 64
-    assert len(sig_v1["shot_profile"]["slow_neural_embedding"]) == 64
-    assert len(sig_v1["shot_profile"]["fast_neural_embedding"]) == 64
-    assert 0.0 <= sig_v1["shot_profile"]["yamnet_gunshot_score"] <= 1.0
+    assert len(sig_v1["shot_profile"]["video_features"]) == 6
+    assert sig_v1["shot_profile"]["trained_videos_count"] == 1
+    assert sig_v1["shot_profile"]["positive_shots_count"] == 3
 
     # Check Module 4 Analytics & Split Calculation (FR-4.1)
     analytics = ann_data["analytics"]
@@ -160,6 +159,22 @@ def test_full_workflow_cold_start_learning_automated_and_rendering(
     assert len(session_2["shot_timestamps"]) == 3
     for predicted, expected in zip(session_2["shot_timestamps"], [2.25, 2.70, 3.10]):
         assert abs(predicted - expected) <= 0.08
+
+    # Verify /api/check validation scorecard endpoint
+    res_check = client.post(
+        "/api/check",
+        json={
+            "video_id": session_2["video_id"],
+            "gun_name": "Glock 19",
+            "ground_truth_beep": 1.00,
+            "ground_truth_shots": [2.25, 2.70, 3.10],
+        },
+    )
+    assert res_check.status_code == 200
+    chk = res_check.json()["check_result"]
+    assert chk["f1_score"] == pytest.approx(1.0, abs=1e-3)
+    assert chk["matched_shots"] == 3
+    assert chk["false_positives"] == 0
 
     # Step 4: Refine profile & render annotated video (FR-2.4 & FR-5.1 - FR-5.3)
     render_payload = {
@@ -320,8 +335,8 @@ def test_default_firearms_and_crud_management(client: TestClient):
     assert "CBC 7022 .22LR" in restored_names
 
 
-def test_yamnet_slow_and_fast_shot_regimes(tmp_path: Path):
-    """Verify YAMNet + Slow (>2000ms) and Fast (<=2000ms) regime signature extraction and detection."""
+def test_multimodal_slow_and_fast_shot_regimes(tmp_path: Path):
+    """Verify Multimodal (Video + Audio) + Slow (>2000ms) and Fast (<=2000ms) regime signature extraction and detection."""
     from backend.audio_engine import (
         detect_events_with_profile,
         extract_normalized_mono_pcm,
@@ -347,14 +362,22 @@ def test_yamnet_slow_and_fast_shot_regimes(tmp_path: Path):
         wav_path=wav_path,
         beep_timestamp=0.80,
         shot_timestamps=expected_shots,
+        video_path=vid_path,
+        video_id="vid_train_1",
+        base_dir=tmp_path,
     )
     assert any(abs(x) > 1e-6 for x in sig.shot_profile.slow_features)
     assert any(abs(x) > 1e-6 for x in sig.shot_profile.fast_features)
-    assert any(abs(x) > 1e-6 for x in sig.shot_profile.slow_neural_embedding)
-    assert any(abs(x) > 1e-6 for x in sig.shot_profile.fast_neural_embedding)
-    assert sig.shot_profile.slow_neural_embedding != sig.shot_profile.fast_neural_embedding
+    assert any(abs(x) > 1e-6 for x in sig.shot_profile.video_features)
+    assert sig.shot_profile.trained_videos_count == 1
+    assert sig.shot_profile.positive_shots_count == 3
 
-    det_beep, det_shots = detect_events_with_profile(wav_path, sig)
+    det_beep, det_shots = detect_events_with_profile(
+        wav_path=wav_path,
+        signature=sig,
+        video_path=vid_path,
+        base_dir=tmp_path,
+    )
     assert det_beep is not None and abs(det_beep - 0.80) <= 0.12
     assert len(det_shots) == 3
     for pred, exp in zip(det_shots, expected_shots):

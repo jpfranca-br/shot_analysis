@@ -21,8 +21,10 @@ from backend.models import (
     FirearmCreatePayload,
     FirearmUpdatePayload,
     SessionAnnotationPayload,
+    SessionCheckPayload,
     SessionRecord,
 )
+from backend.multimodal_detector import evaluate_session_predictions
 from backend.storage import StorageManager
 from backend.video_engine import render_annotated_video
 
@@ -40,14 +42,17 @@ def get_app_config() -> AppConfig:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
-    storage = StorageManager()
+    storage_fn = app.dependency_overrides.get(get_storage, get_storage)
+    storage = storage_fn()
     storage.cleanup_videos(
         keep_uploaded=cfg.keep_uploaded,
         keep_rendered=cfg.keep_rendered,
     )
     yield
     cfg_exit = load_config()
-    storage.cleanup_videos(
+    storage_exit_fn = app.dependency_overrides.get(get_storage, get_storage)
+    storage_exit = storage_exit_fn()
+    storage_exit.cleanup_videos(
         keep_uploaded=cfg_exit.keep_uploaded,
         keep_rendered=cfg_exit.keep_rendered,
     )
@@ -234,9 +239,14 @@ async def upload_video(
         shot_timestamps = []
         sig_version = None
     else:
-        # FR-2.3: Automated Mode using librosa peak detection & template matching
+        # FR-2.3: Automated Mode using Multimodal (Video + Audio) detection
         mode = "automated"
-        beep_timestamp, shot_timestamps = detect_events_with_profile(wav_path, signature)
+        beep_timestamp, shot_timestamps = detect_events_with_profile(
+            wav_path=wav_path,
+            signature=signature,
+            video_path=video_path,
+            base_dir=storage.base_dir,
+        )
         sig_version = signature.signature_version
 
     session = SessionRecord(
@@ -250,6 +260,8 @@ async def upload_video(
         signature_version=sig_version,
         beep_timestamp=beep_timestamp,
         shot_timestamps=shot_timestamps,
+        predicted_beep=beep_timestamp,
+        predicted_shots=list(shot_timestamps),
         user_modified=False,
     )
     storage.save_session(session)
@@ -293,7 +305,12 @@ def create_demo_session(
         sig_version = None
     else:
         mode = "automated"
-        beep_timestamp, shot_timestamps = detect_events_with_profile(wav_path, signature)
+        beep_timestamp, shot_timestamps = detect_events_with_profile(
+            wav_path=wav_path,
+            signature=signature,
+            video_path=video_path,
+            base_dir=storage.base_dir,
+        )
         sig_version = signature.signature_version
 
     session = SessionRecord(
@@ -307,6 +324,8 @@ def create_demo_session(
         signature_version=sig_version,
         beep_timestamp=beep_timestamp,
         shot_timestamps=shot_timestamps,
+        predicted_beep=beep_timestamp,
+        predicted_shots=list(shot_timestamps),
         user_modified=False,
     )
     storage.save_session(session)
@@ -355,6 +374,13 @@ def save_and_refine_annotations(
     if not wav_path.exists():
         raise HTTPException(status_code=404, detail="Extracted session WAV file not found")
 
+    # Locate uploaded video file for multimodal (Video + Audio) training
+    input_video_path = None
+    for cand in storage.uploads_dir.glob(f"{session.video_id}.*"):
+        if cand.suffix.lower() in ALLOWED_EXTENSIONS:
+            input_video_path = cand
+            break
+
     existing_sig = storage.get_signature(gun_name)
     updated_sig = update_signature_profile(
         existing=existing_sig,
@@ -362,6 +388,9 @@ def save_and_refine_annotations(
         wav_path=wav_path,
         beep_timestamp=beep_t,
         shot_timestamps=sorted_shots,
+        video_path=input_video_path,
+        video_id=session.video_id,
+        base_dir=storage.base_dir,
     )
     storage.save_signature(updated_sig)
 
@@ -378,6 +407,59 @@ def save_and_refine_annotations(
         "session": session.model_dump(),
         "analytics": analytics.model_dump(),
         "signature": updated_sig.model_dump(),
+    }
+
+
+@app.post("/api/check")
+def check_model_predictions_endpoint(
+    payload: SessionCheckPayload,
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    """
+    Evaluate automated multimodal model predictions on a Check video against user-verified
+    ground truth timestamps without modifying the trained model.
+    """
+    session = storage.get_session(payload.video_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    gun_name = payload.gun_name.strip() or session.gun_name
+    signature = storage.get_signature(gun_name)
+
+    pred_beep = payload.predicted_beep
+    pred_shots = payload.predicted_shots
+
+    if pred_beep is None and pred_shots is None:
+        if session.predicted_beep is not None or session.predicted_shots:
+            pred_beep = session.predicted_beep
+            pred_shots = session.predicted_shots
+        elif signature is not None:
+            wav_path = storage.uploads_dir / f"{session.video_id}.wav"
+            input_video_path = None
+            for cand in storage.uploads_dir.glob(f"{session.video_id}.*"):
+                if cand.suffix.lower() in ALLOWED_EXTENSIONS:
+                    input_video_path = cand
+                    break
+            if wav_path.exists():
+                pred_beep, pred_shots = detect_events_with_profile(
+                    wav_path=wav_path,
+                    signature=signature,
+                    video_path=input_video_path,
+                    base_dir=storage.base_dir,
+                )
+
+    result = evaluate_session_predictions(
+        gun_name=gun_name,
+        signature_version=signature.signature_version if signature else 0,
+        ground_truth_beep=payload.ground_truth_beep,
+        ground_truth_shots=payload.ground_truth_shots,
+        predicted_beep=pred_beep,
+        predicted_shots=pred_shots or [],
+    )
+    return {
+        "check_result": result.model_dump(),
+        "predicted_beep": pred_beep,
+        "predicted_shots": pred_shots or [],
     }
 
 

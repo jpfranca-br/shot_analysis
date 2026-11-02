@@ -264,11 +264,20 @@
               <span>Shot Envelope Decay Rate:</span>
               <strong id="sigShotMeta">--</strong>
             </div>
+            <div class="sig-row">
+              <span>Audio+Video Training Set:</span>
+              <strong id="sigDatasetMeta">--</strong>
+            </div>
           </div>
+
+          <div id="checkResultBox" class="status-toast" style="margin-bottom:0.65rem;" hidden></div>
 
           <div class="signature-actions">
             <button type="button" id="saveProfileBtn" class="btn btn-secondary btn-full" disabled>
-              Confirm Markers &amp; Refine Audio Profile
+              Confirm Markers &amp; Train Audio+Video Model
+            </button>
+            <button type="button" id="checkAccuracyBtn" class="btn btn-cyan btn-full" disabled>
+              ✔ Check Model Accuracy vs. Ground Truth
             </button>
             <button type="button" id="openFirearmManagerPanelBtn" class="btn btn-secondary btn-full">
               ⚙ Manage Firearms &amp; Signature Models
@@ -404,6 +413,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=4"></script>
+  <script src="/app.js?v=5"></script>
 </body>
 </html>

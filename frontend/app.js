@@ -60,7 +60,10 @@ const els = {
   sigVersion: document.getElementById("sigVersion"),
   sigBeepMeta: document.getElementById("sigBeepMeta"),
   sigShotMeta: document.getElementById("sigShotMeta"),
+  sigDatasetMeta: document.getElementById("sigDatasetMeta"),
+  checkResultBox: document.getElementById("checkResultBox"),
   saveProfileBtn: document.getElementById("saveProfileBtn"),
+  checkAccuracyBtn: document.getElementById("checkAccuracyBtn"),
   processVideoBtn: document.getElementById("processVideoBtn"),
   downloadVideoLink: document.getElementById("downloadVideoLink"),
   statusToast: document.getElementById("statusToast"),
@@ -208,13 +211,16 @@ function renderFirearmManagerTable() {
       ? `<span class="status-badge badge-automated">Trained v${sig.signature_version}</span>`
       : `<span class="status-badge badge-training">Cold Start (v0)</span>`;
     const beepInfo = `${Number(sig.beep_profile.frequency_hz).toFixed(0)} Hz / ${sig.beep_profile.duration_ms} ms`;
-    const hasNeural =
-      Array.isArray(sig.shot_profile.neural_embedding) &&
-      sig.shot_profile.neural_embedding.some((x) => Math.abs(x) > 1e-6);
-    const yamnetBadge = hasNeural
-      ? `YAMNet ${(Number(sig.shot_profile.yamnet_gunshot_score || 0) * 100).toFixed(0)}%`
-      : "YAMNet Ready";
-    const shotInfo = `${Number(sig.shot_profile.decay_rate).toFixed(1)} dB/s • ${yamnetBadge}`;
+    const vids = sig.shot_profile.trained_videos_count || 0;
+    const pos = sig.shot_profile.positive_shots_count || 0;
+    const cvStr =
+      sig.shot_profile.cv_f1_score !== null &&
+      sig.shot_profile.cv_f1_score !== undefined
+        ? ` • F1 ${(sig.shot_profile.cv_f1_score * 100).toFixed(0)}%`
+        : "";
+    const dsBadge =
+      vids > 0 ? ` • ${vids} vid (${pos} shots)${cvStr}` : "";
+    const shotInfo = `${Number(sig.shot_profile.decay_rate).toFixed(1)} dB/s${dsBadge}`;
     const updatedDate = sig.updated_at
       ? new Date(sig.updated_at).toLocaleString()
       : "--";
@@ -441,21 +447,35 @@ function renderSignatureUI() {
   els.sigGunName.textContent = state.session.gun_name;
 
   if (state.signature) {
-    const hasNeural =
-      Array.isArray(state.signature.shot_profile.neural_embedding) &&
-      state.signature.shot_profile.neural_embedding.some((x) => Math.abs(x) > 1e-6);
-    els.sigVersion.textContent = `v${state.signature.signature_version} (${hasNeural ? "YAMNet + Slow/Fast" : "Trained"})`;
+    const sp = state.signature.shot_profile;
+    const vids = sp.trained_videos_count || 0;
+    const pos = sp.positive_shots_count || 0;
+    const neg = sp.hard_negatives_count || 0;
+    const hasVideoVec =
+      Array.isArray(sp.video_features) &&
+      sp.video_features.some((x) => Math.abs(x) > 1e-6);
+    els.sigVersion.textContent = `v${state.signature.signature_version} (${hasVideoVec ? "Audio+Video Multimodal" : "Trained"})`;
     els.sigBeepMeta.textContent = `${state.signature.beep_profile.frequency_hz.toFixed(0)} Hz / ${state.signature.beep_profile.duration_ms} ms`;
-    const yamnetText = hasNeural
-      ? ` • YAMNet ${(Number(state.signature.shot_profile.yamnet_gunshot_score || 0) * 100).toFixed(0)}%`
-      : " • YAMNet Active";
-    els.sigShotMeta.textContent = `${state.signature.shot_profile.decay_rate.toFixed(1)} dB/s${yamnetText}`;
+    els.sigShotMeta.textContent = `${sp.decay_rate.toFixed(1)} dB/s • Slow/Fast (>2000ms)`;
+    if (els.sigDatasetMeta) {
+      const f1Text =
+        sp.cv_f1_score !== null && sp.cv_f1_score !== undefined
+          ? ` • CV F1 ${(sp.cv_f1_score * 100).toFixed(0)}%`
+          : "";
+      els.sigDatasetMeta.textContent =
+        vids > 0
+          ? `${vids} Video${vids === 1 ? "" : "s"} (${pos} Shots / ${neg} Hard Negs)${f1Text}`
+          : "Template Ready (Confirm to harvest samples)";
+    }
     els.signatureBadge.textContent = `${state.session.gun_name} • Signature v${state.signature.signature_version}`;
     els.signatureBadge.className = "status-badge badge-automated";
   } else {
     els.sigVersion.textContent = "Cold Start (Unlearned)";
     els.sigBeepMeta.textContent = "Awaiting Training Confirmation";
     els.sigShotMeta.textContent = "Awaiting Training Confirmation";
+    if (els.sigDatasetMeta) {
+      els.sigDatasetMeta.textContent = "0 Videos Trained";
+    }
     els.signatureBadge.textContent = `${state.session.gun_name} • Cold Start`;
     els.signatureBadge.className = "status-badge badge-training";
   }
@@ -707,6 +727,7 @@ async function initWaveSurfer(session) {
     els.addBeepBtn.disabled = false;
     els.addShotBtn.disabled = false;
     els.saveProfileBtn.disabled = false;
+    if (els.checkAccuracyBtn) els.checkAccuracyBtn.disabled = false;
     els.processVideoBtn.disabled = false;
 
     syncWaveformMarkers();
@@ -779,6 +800,7 @@ function handleSessionLoaded(payload) {
 
   els.videoSourceToggle.hidden = true;
   els.downloadVideoLink.hidden = true;
+  if (els.checkResultBox) els.checkResultBox.hidden = true;
   els.deleteMarkerBtn.disabled = true;
 
   if (state.session.mode === "automated") {
@@ -873,13 +895,68 @@ async function saveAndRefineProfile() {
     renderAnalyticsUI();
     await fetchFirearms();
     showToast(
-      `✓ Profile "${state.signature.gun_name}" refined to v${state.signature.signature_version}!`
+      `✓ Trained "${state.signature.gun_name}" (v${state.signature.signature_version} • ${state.signature.shot_profile.trained_videos_count || 1} videos)!`
     );
   } catch (err) {
     showToast(err.message, true);
   } finally {
     els.saveProfileBtn.disabled = false;
-    els.saveProfileBtn.textContent = "Confirm Markers & Refine Audio Profile";
+    els.saveProfileBtn.textContent = "Confirm Markers & Train Audio+Video Model";
+  }
+}
+
+async function checkModelAccuracy() {
+  if (!state.session) return;
+  if (els.checkAccuracyBtn) {
+    els.checkAccuracyBtn.disabled = true;
+    els.checkAccuracyBtn.textContent = "⏳ Checking Model Accuracy...";
+  }
+  try {
+    const body = {
+      video_id: state.session.video_id,
+      gun_name: els.firearmInput.value.trim() || state.session.gun_name,
+      ground_truth_beep: state.beepTimestamp,
+      ground_truth_shots: state.shotTimestamps,
+    };
+    const res = await fetch("/api/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || "Check failed");
+    }
+    const data = await res.json();
+    const r = data.check_result;
+    const f1Pct = (r.f1_score * 100).toFixed(1);
+    const precPct = (r.precision * 100).toFixed(0);
+    const recPct = (r.recall * 100).toFixed(0);
+    const beepErr =
+      r.beep_error_ms !== null ? `${r.beep_error_ms.toFixed(0)}ms` : "N/A";
+    const shotErr =
+      r.mean_shot_error_ms !== null
+        ? `${r.mean_shot_error_ms.toFixed(0)}ms`
+        : "N/A";
+
+    if (els.checkResultBox) {
+      els.checkResultBox.hidden = false;
+      els.checkResultBox.innerHTML = `
+        <strong>Check Scorecard (v${r.signature_version}):</strong> F1 <strong>${f1Pct}%</strong> (Prec ${precPct}% / Rec ${recPct}%)<br/>
+        Matched: <strong>${r.matched_shots}/${r.total_ground_truth_shots}</strong> shots • False Pos: <strong>${r.false_positives}</strong> • Beep Err: <strong>${beepErr}</strong> • Avg Shot Err: <strong>${shotErr}</strong>
+      `;
+    }
+    showToast(
+      `✓ Check Result: ${r.matched_shots}/${r.total_ground_truth_shots} shots matched (F1 ${f1Pct}%).`
+    );
+  } catch (err) {
+    showToast(err.message, true);
+  } finally {
+    if (els.checkAccuracyBtn) {
+      els.checkAccuracyBtn.disabled = false;
+      els.checkAccuracyBtn.textContent =
+        "✔ Check Model Accuracy vs. Ground Truth";
+    }
   }
 }
 
@@ -1082,6 +1159,9 @@ function bindEvents() {
 
   // Profile & Render Buttons
   els.saveProfileBtn.addEventListener("click", saveAndRefineProfile);
+  if (els.checkAccuracyBtn) {
+    els.checkAccuracyBtn.addEventListener("click", checkModelAccuracy);
+  }
   els.processVideoBtn.addEventListener("click", processAndRenderVideo);
 
   // Firearm Manager Modal Controls

@@ -10,9 +10,10 @@ A web-based application designed for firearms practitioners to analyze training 
   - **Default Firearms Included:** Pre-configured with **CZ P-10C 9mm**, **T4 5.56x45mm**, and **CBC 7022 .22LR**.
   - **Firearm & Signature Model Manager:** Built-in UI manager (`⚙ Manage Firearms & Signatures`) to add new firearms, rename or edit acoustic parameters (Beep Frequency Hz, Duration ms, Shot Decay Rate dB/s), reset a learned signature back to Cold Start, remove firearms, or restore defaults.
   - **Cold Start (Training Mode):** When a new firearm model is used for the first time, manually annotate the timer beep and gunshots on the interactive waveform to train its acoustic profile.
-  - **Automated Detection Mode (Google YAMNet Local Neural Model + Slow/Fast >2000ms Signatures):** Once a profile exists for a firearm, future uploads automatically detect the timer beep ($t = 0.00\text{s}$) and gunshot timestamps using:
-    - **Local Pretrained Google YAMNet (ONNX Runtime):** Evaluates candidate transients across 521 AudioSet classes (`Gunshot, gunfire`, `Explosion`, `Cap gun`, `Beep, bleep`, `Speech`, etc.) and extracts 64-D L2-normalized neural embeddings alongside 16-D `librosa` MFCC/spectral vectors.
-    - **Slow Shots ($>2000\text{ ms}$) vs. Fast Shots ($\le 2000\text{ ms}$) Signature Matching:** Explicitly models two distinct acoustic and neural regimes per firearm (`slow_features` / `slow_neural_embedding` for the first shot and shots separated by $>2000\text{ ms}$ with full uncompressed microphone gain, and `fast_features` / `fast_neural_embedding` for rapid follow-up shots $\le 2000\text{ ms}$ under smartphone AGC compression and room reverberation).
+  - **Automated Detection Mode (Multimodal Video + Audio Supervised Model):** Once a profile exists for a firearm, future uploads automatically detect the timer beep ($t = 0.00\text{s}$) and gunshot timestamps using:
+    - **Multimodal (Video + Audio) Feature Extraction (`backend/multimodal_detector.py`):** Combines the proven `cf032ba` 16-D acoustic vector (`13 MFCCs + spectral centroid + spectral bandwidth + spectral flatness`), narrowband spectral-crest beep detection, positive reverb step-up physics, and synchronized OpenCV visual recoil jerk, motion blur shock, and muzzle flash features.
+    - **Slow Shots ($>2000\text{ ms}$) vs. Fast Shots ($\le 2000\text{ ms}$) Regime Physics & Templates:** Models slow/first shots ($>2000\text{ ms}$ apart) separately from fast follow-up shots ($\le 2000\text{ ms}$ apart riding on indoor reverberation tails).
+    - **Multi-Video Positive + Hard-Negative Classifier & "Check Accuracy" Scorecard:** Each confirmed video harvests positive shots and hard negatives (reverb tails, range chatter, brass bounces) to train a per-firearm `scikit-learn` Random Forest classifier, and includes a **✔ Check Model Accuracy vs. Ground Truth** button to evaluate Precision, Recall, F1, and timing error (ms) across your test videos.
   - **Continuous Profile Refinement:** Every time you confirm or adjust markers, the firearm's acoustic signature vector (`signatures.json`) is refined and versioned (`v1`, `v2`, ...).
 - **Synchronized Video & 60fps Waveform Editor**
   - HTML5 video player locked in sync with an interactive **WaveSurfer.js v7** waveform and timeline ruler.
@@ -39,15 +40,15 @@ A web-based application designed for firearms practitioners to analyze training 
 shot_analysis/
 ├── backend/
 │   ├── __init__.py
-│   ├── main.py             # FastAPI application & REST endpoints
-│   ├── config.py           # Storage configuration loader (config.json & env vars)
-│   ├── models.py           # Pydantic data schemas (FirearmAudioSignature, SessionAnnotationPayload)
-│   ├── storage.py          # Thread-safe local JSON store for signatures & sessions
-│   ├── yamnet_model.py     # Local Google YAMNet neural audio classifier & 64-D embedding engine (ONNX)
-│   ├── audio_engine.py     # Normalized mono PCM extraction, YAMNet + Slow/Fast (>2000ms) signature detection
-│   ├── analytics.py        # Draw time, split time, and stage time computation
-│   ├── video_engine.py     # OpenCV burnt-in HUD overlay renderer & VFR-synced H.264/AAC remuxer
-│   └── demo_generator.py   # Synthetic shooting practice video generator for instant testing
+│   ├── main.py                # FastAPI application & REST endpoints (/api/upload, /api/annotations, /api/check)
+│   ├── config.py              # Storage configuration loader (config.json & env vars)
+│   ├── models.py              # Pydantic data schemas (FirearmAudioSignature, SessionCheckResult)
+│   ├── storage.py             # Thread-safe local JSON store for signatures & sessions
+│   ├── multimodal_detector.py # Multimodal (Video + Audio) beep/shot detector & per-firearm Random Forest trainer
+│   ├── audio_engine.py        # Normalized mono PCM extraction & multimodal signature refinement
+│   ├── analytics.py           # Draw time, split time, and stage time computation
+│   ├── video_engine.py        # OpenCV burnt-in HUD overlay renderer & VFR-synced H.264/AAC remuxer
+│   └── demo_generator.py      # Synthetic shooting practice video generator for instant testing
 ├── frontend/
 │   ├── index.html          # Single-page application layout
 │   ├── styles.css          # Tactical dark-mode stylesheet
