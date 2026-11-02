@@ -1284,7 +1284,7 @@ function bindEvents() {
     }
   });
 
-  // Upload Form Submit with live XHR upload progress & detailed error reporting
+  // Upload Form Submit using 512 KB chunked binary upload (bypasses proxy 1MB limits & multipart rollover stalls)
   els.uploadForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const file = els.videoFileInput.files[0];
@@ -1303,88 +1303,97 @@ function bindEvents() {
     }
 
     els.uploadBtn.disabled = true;
-    const totalMb = (file.size / (1024 * 1024)).toFixed(2);
+    const totalBytes = file.size;
+    const totalMb = (totalBytes / (1024 * 1024)).toFixed(2);
     els.uploadBtn.textContent = "⏳ Uploading 0%...";
-    showUploadStatus(`⏳ Starting upload of "${file.name}" (${totalMb} MB) to server...`);
+    showUploadStatus(`⏳ Initializing upload of "${file.name}" (${totalMb} MB)...`);
 
     try {
-      const formData = new FormData();
-      formData.append("video", file);
-      formData.append("gun_name", gunName);
-
-      const data = await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", "/api/upload", true);
-
-        xhr.upload.onprogress = (evt) => {
-          if (evt.lengthComputable) {
-            const pct = Math.min(100, Math.round((evt.loaded / evt.total) * 100));
-            const loadedMb = (evt.loaded / (1024 * 1024)).toFixed(2);
-            if (pct < 100) {
-              els.uploadBtn.textContent = `⏳ Uploading ${pct}%`;
-              showUploadStatus(
-                `⬆ Uploading to server: ${pct}% (${loadedMb} / ${totalMb} MB)...`
-              );
-            } else {
-              els.uploadBtn.textContent = "⏳ Analyzing on Server...";
-              showUploadStatus(
-                `⚙ Upload 100% (${totalMb} MB received). Server is extracting PCM audio & analyzing...`
-              );
-            }
-          }
-        };
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            try {
-              resolve(JSON.parse(xhr.responseText));
-            } catch (parseErr) {
-              reject(new Error("Invalid JSON response from server."));
-            }
-          } else {
-            let detail = "";
-            try {
-              const parsed = JSON.parse(xhr.responseText);
-              detail = parsed.detail || "";
-            } catch (_) {
-              detail = (xhr.responseText || "").replace(/<[^>]*>/g, " ").trim().slice(0, 140);
-            }
-            if (xhr.status === 413) {
-              reject(
-                new Error(
-                  `HTTP 413 Payload Too Large (${totalMb} MB). Your reverse proxy (e.g., Nginx) blocked the upload — add 'client_max_body_size 500M;' to your Nginx config.`
-                )
-              );
-            } else if (xhr.status === 502 || xhr.status === 504) {
-              reject(
-                new Error(
-                  `HTTP ${xhr.status} Gateway Error/Timeout. Check that uvicorn is running and proxy_read_timeout is >= 300s.`
-                )
-              );
-            } else {
-              reject(
-                new Error(
-                  `Upload failed (HTTP ${xhr.status})${detail ? ": " + detail : ""}`
-                )
-              );
-            }
-          }
-        };
-
-        xhr.onerror = () => {
-          reject(
-            new Error(
-              "Network error while uploading to server. Check connection or reverse proxy upload size limits."
-            )
-          );
-        };
-
-        xhr.ontimeout = () => {
-          reject(new Error("Upload timed out waiting for server response."));
-        };
-
-        xhr.send(formData);
+      // 1. Initialize chunked upload session
+      const initParams = new URLSearchParams({
+        filename: file.name,
+        gun_name: gunName,
       });
+      const initRes = await fetch(`/api/upload/init?${initParams.toString()}`, {
+        method: "POST",
+      });
+      if (!initRes.ok) {
+        let errDetail = `HTTP ${initRes.status}`;
+        try {
+          const j = await initRes.json();
+          if (j.detail) errDetail = j.detail;
+        } catch (_) {}
+        throw new Error(`Upload init failed: ${errDetail}`);
+      }
+      const initData = await initRes.json();
+      const { video_id, ext } = initData;
+
+      // 2. Upload in 512 KB binary chunks (< 1 MB so default Nginx client_max_body_size 1m never blocks)
+      const CHUNK_SIZE = 512 * 1024;
+      let offset = 0;
+      while (offset < totalBytes) {
+        const end = Math.min(offset + CHUNK_SIZE, totalBytes);
+        const blobChunk = file.slice(offset, end);
+
+        let chunkOk = false;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const chunkRes = await fetch(
+              `/api/upload/chunk/${encodeURIComponent(video_id)}?ext=${encodeURIComponent(ext)}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/octet-stream" },
+                body: blobChunk,
+              }
+            );
+            if (!chunkRes.ok) {
+              throw new Error(`HTTP ${chunkRes.status} on chunk at ${(offset / (1024 * 1024)).toFixed(2)} MB`);
+            }
+            chunkOk = true;
+            break;
+          } catch (cErr) {
+            lastErr = cErr;
+            await new Promise((r) => setTimeout(r, 400));
+          }
+        }
+        if (!chunkOk) {
+          throw lastErr || new Error("Failed to upload video chunk.");
+        }
+
+        offset = end;
+        const pct = Math.min(100, Math.round((offset / totalBytes) * 100));
+        const loadedMb = (offset / (1024 * 1024)).toFixed(2);
+        els.uploadBtn.textContent = `⏳ Uploading ${pct}%`;
+        showUploadStatus(
+          `⬆ Uploading to server: ${pct}% (${loadedMb} / ${totalMb} MB)...`
+        );
+      }
+
+      // 3. Finalize session (FFmpeg audio extraction & multimodal detection)
+      els.uploadBtn.textContent = "⏳ Analyzing on Server...";
+      showUploadStatus(
+        `⚙ Upload 100% (${totalMb} MB saved on server). Extracting PCM audio & analyzing...`
+      );
+
+      const completeParams = new URLSearchParams({
+        filename: file.name,
+        gun_name: gunName,
+        ext,
+      });
+      const compRes = await fetch(
+        `/api/upload/complete/${encodeURIComponent(video_id)}?${completeParams.toString()}`,
+        { method: "POST" }
+      );
+      if (!compRes.ok) {
+        let errDetail = `HTTP ${compRes.status}`;
+        try {
+          const j = await compRes.json();
+          if (j.detail) errDetail = j.detail;
+        } catch (_) {}
+        throw new Error(`Analysis failed: ${errDetail}`);
+      }
+      const data = await compRes.json();
 
       if (state.localVideoObjectUrl) {
         URL.revokeObjectURL(state.localVideoObjectUrl);

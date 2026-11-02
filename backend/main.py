@@ -4,7 +4,7 @@ import shutil
 import uuid
 from typing import Any, Dict
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -192,47 +192,33 @@ def delete_firearm_endpoint(
     return {"deleted": True, "gun_name": gun_name}
 
 
-@app.post("/api/upload")
-def upload_video(
-    video: UploadFile = File(...),
-    gun_name: str = Form(...),
-    storage: StorageManager = Depends(get_storage),
-    cfg: AppConfig = Depends(get_app_config),
+def _finalize_uploaded_video_session(
+    video_id: str,
+    orig_filename: str,
+    ext: str,
+    cleaned_gun: str,
+    storage: StorageManager,
 ) -> Dict[str, Any]:
-    cleaned_gun = gun_name.strip()
-    if not cleaned_gun:
-        raise HTTPException(status_code=400, detail="Firearm name is required (FR-1.2).")
-
-    orig_filename = video.filename or "practice.mp4"
-    ext = Path(orig_filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported video format '{ext}'. Supported formats: .mp4, .mov, .webm (FR-1.1).",
-        )
-
-    # Purge previous sessions' videos if config.json specifies not to store videos
-    storage.cleanup_videos(
-        keep_uploaded=cfg.keep_uploaded,
-        keep_rendered=cfg.keep_rendered,
-    )
-
-    video_id = uuid.uuid4().hex[:12]
     saved_video_name = f"{video_id}{ext}"
     saved_wav_name = f"{video_id}.wav"
-
     video_path = storage.uploads_dir / saved_video_name
     wav_path = storage.uploads_dir / saved_wav_name
 
-    print(f"[Upload {video_id}] Saving uploaded file '{orig_filename}'...", flush=True)
-    with video_path.open("wb") as buffer:
-        shutil.copyfileobj(video.file, buffer)
+    if not video_path.exists() or video_path.stat().st_size == 0:
+        raise HTTPException(status_code=400, detail="Uploaded video file is empty or missing.")
+
     size_mb = video_path.stat().st_size / (1024 * 1024)
-    print(f"[Upload {video_id}] Saved {size_mb:.2f} MB. Extracting mono PCM audio via FFmpeg...", flush=True)
+    print(
+        f"[Upload {video_id}] Saved {size_mb:.2f} MB ('{orig_filename}'). Extracting mono PCM audio via FFmpeg...",
+        flush=True,
+    )
 
     # FR-1.3: Extract audio track into normalized mono PCM stream
     duration_sec = extract_normalized_mono_pcm(video_path, wav_path)
-    print(f"[Upload {video_id}] Audio extracted ({duration_sec:.2f}s). Checking signature for '{cleaned_gun}'...", flush=True)
+    print(
+        f"[Upload {video_id}] Audio extracted ({duration_sec:.2f}s). Checking signature for '{cleaned_gun}'...",
+        flush=True,
+    )
 
     # FR-2.1: Check local database for existing audio profile associated with firearm name
     signature = storage.get_signature(cleaned_gun)
@@ -248,7 +234,10 @@ def upload_video(
     else:
         # FR-2.3: Automated Mode using Multimodal (Video + Audio) detection
         mode = "automated"
-        print(f"[Upload {video_id}] Running multimodal detection (v{signature.signature_version})...", flush=True)
+        print(
+            f"[Upload {video_id}] Running multimodal detection (v{signature.signature_version})...",
+            flush=True,
+        )
         beep_timestamp, shot_timestamps, end_beep_timestamp = detect_events_with_limit(
             wav_path=wav_path,
             signature=signature,
@@ -289,6 +278,132 @@ def upload_video(
         "analytics": analytics.model_dump(),
         "signature": signature.model_dump() if signature else None,
     }
+
+
+@app.post("/api/upload/init")
+def init_chunked_upload(
+    filename: str = Query("practice.mp4"),
+    gun_name: str = Query(...),
+    storage: StorageManager = Depends(get_storage),
+    cfg: AppConfig = Depends(get_app_config),
+) -> Dict[str, Any]:
+    cleaned_gun = gun_name.strip()
+    if not cleaned_gun:
+        raise HTTPException(status_code=400, detail="Firearm name is required (FR-1.2).")
+
+    orig_filename = filename or "practice.mp4"
+    ext = Path(orig_filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported video format '{ext}'. Supported formats: .mp4, .mov, .webm (FR-1.1).",
+        )
+
+    storage.cleanup_videos(
+        keep_uploaded=cfg.keep_uploaded,
+        keep_rendered=cfg.keep_rendered,
+    )
+
+    video_id = uuid.uuid4().hex[:12]
+    video_path = storage.uploads_dir / f"{video_id}{ext}"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"")
+    print(f"[Upload {video_id}] Initialized chunked upload for '{orig_filename}' ({cleaned_gun})", flush=True)
+
+    return {
+        "video_id": video_id,
+        "ext": ext,
+        "filename": orig_filename,
+        "gun_name": cleaned_gun,
+    }
+
+
+@app.post("/api/upload/chunk/{video_id}")
+async def append_upload_chunk(
+    video_id: str,
+    request: Request,
+    ext: str = Query(".mp4"),
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    safe_ext = ext.lower() if ext.lower() in ALLOWED_EXTENSIONS else ".mp4"
+    video_path = storage.uploads_dir / f"{video_id}{safe_ext}"
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Upload session not initialized.")
+
+    chunk = await request.body()
+    if chunk:
+        with video_path.open("ab") as f:
+            f.write(chunk)
+
+    total_bytes = video_path.stat().st_size
+    return {
+        "video_id": video_id,
+        "received_bytes": len(chunk),
+        "total_bytes": total_bytes,
+    }
+
+
+@app.post("/api/upload/complete/{video_id}")
+def complete_chunked_upload(
+    video_id: str,
+    filename: str = Query("practice.mp4"),
+    gun_name: str = Query(...),
+    ext: str = Query(".mp4"),
+    storage: StorageManager = Depends(get_storage),
+) -> Dict[str, Any]:
+    cleaned_gun = gun_name.strip()
+    if not cleaned_gun:
+        raise HTTPException(status_code=400, detail="Firearm name is required (FR-1.2).")
+    safe_ext = ext.lower() if ext.lower() in ALLOWED_EXTENSIONS else ".mp4"
+    return _finalize_uploaded_video_session(
+        video_id=video_id,
+        orig_filename=filename or "practice.mp4",
+        ext=safe_ext,
+        cleaned_gun=cleaned_gun,
+        storage=storage,
+    )
+
+
+@app.post("/api/upload")
+def upload_video(
+    video: UploadFile = File(...),
+    gun_name: str = Form(...),
+    storage: StorageManager = Depends(get_storage),
+    cfg: AppConfig = Depends(get_app_config),
+) -> Dict[str, Any]:
+    cleaned_gun = gun_name.strip()
+    if not cleaned_gun:
+        raise HTTPException(status_code=400, detail="Firearm name is required (FR-1.2).")
+
+    orig_filename = video.filename or "practice.mp4"
+    ext = Path(orig_filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported video format '{ext}'. Supported formats: .mp4, .mov, .webm (FR-1.1).",
+        )
+
+    # Purge previous sessions' videos if config.json specifies not to store videos
+    storage.cleanup_videos(
+        keep_uploaded=cfg.keep_uploaded,
+        keep_rendered=cfg.keep_rendered,
+    )
+
+    video_id = uuid.uuid4().hex[:12]
+    saved_video_name = f"{video_id}{ext}"
+    video_path = storage.uploads_dir / saved_video_name
+
+    print(f"[Upload {video_id}] Saving uploaded file '{orig_filename}'...", flush=True)
+    with video_path.open("wb") as buffer:
+        shutil.copyfileobj(video.file, buffer)
+
+    return _finalize_uploaded_video_session(
+        video_id=video_id,
+        orig_filename=orig_filename,
+        ext=ext,
+        cleaned_gun=cleaned_gun,
+        storage=storage,
+    )
 
 
 @app.post("/api/demo-upload")
