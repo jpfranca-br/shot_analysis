@@ -32,7 +32,7 @@ A web-based application designed for firearms practitioners to analyze training 
 - **Burnt-In OpenCV Video Overlay Rendering**
   - Renders a downloadable `.mp4` video with original audio preserved and high-contrast tactical HUD overlays showing the **Timer Beep indicator**, **Shot Number**, **Split Time**, **Total Elapsed Time**, and a cumulative **Shot Log**.
 - **Built-In Sample Drill Generator**
-  - Includes a one-click **Load Sample Drill Video** button that synthesizes a range practice video with a 3000 Hz timer beep and 4 shots so you can test the entire workflow immediately.
+  - Includes a one-click **Load Sample** button that synthesizes a range practice video with a 3000 Hz timer beep and 4 shots so you can test the entire workflow immediately.
 
 ---
 
@@ -164,10 +164,10 @@ http://127.0.0.1:8000
 
 1. **Select or Manage a Firearm Model:**
    - Choose a preset (`CZ P-10C 9mm`, `T4 5.56x45mm`, `CBC 7022 .22LR`), choose `+ Custom Firearm Name...`, or click **⚙ Manage Firearms & Signatures** to add, rename, edit, reset, or remove firearm models.
-2. **Upload a Video (or Load Sample Drill):**
-   - Drag and drop a `.mp4`, `.mov`, or `.webm` shooting video and click **Analyze Video & Extract PCM Audio**, **OR** click **Load Sample Drill Video** to generate a ready-to-use practice video.
+2. **Upload a Video (or Load Sample):**
+   - Drag and drop a `.mp4`, `.mov`, or `.webm` shooting video and click **Analyze**, **OR** click **Load Sample** to generate a ready-to-use practice video.
 3. **Review or Annotate Markers:**
-   - **Cold Start:** Scrub or play the video (`0.5x`–`1.0x`), press <kbd>B</kbd> (or click **+ Set Beep**) at the timer beep, and press <kbd>S</kbd> (or click **+ Add Shot**) at each gunshot peak.
+   - **Cold Start:** Scrub or play the video (`0.5x`–`1.0x`), press <kbd>B</kbd> (or click **+ Set Beep**) at the start timer beep, optionally press <kbd>L</kbd> (or click **+ Time Limit**) at a second time-limit beep, and press <kbd>S</kbd> (or click **+ Add Shot**) at each gunshot peak.
    - **Automated Mode:** Review the automatically placed markers and drag any marker on the waveform to fine-tune its timestamp.
 4. **Refine Profile & Render Video:**
    - Click **Confirm Markers & Refine Audio Profile** to save/update the acoustic signature for that firearm.
