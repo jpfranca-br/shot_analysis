@@ -1194,6 +1194,126 @@ async function checkModelAccuracy() {
   }
 }
 
+const PARALLEL_TRANSFER_THREADS = 8;
+const TRANSFER_CHUNK_BYTES = 5 * 1024 * 1024; // 5 MB per chunk
+
+async function downloadRenderedVideoParallel(e) {
+  if (!state.session) return;
+  if (e) e.preventDefault();
+
+  const videoId = state.session.video_id;
+  const origBtnText = "⬇ Download Annotated Video (.MP4)";
+  els.downloadVideoLink.style.pointerEvents = "none";
+  els.downloadVideoLink.style.opacity = "0.75";
+  els.downloadVideoLink.textContent = "⏳ Starting 8-Thread Download...";
+
+  try {
+    const infoRes = await fetch(`/api/videos/${encodeURIComponent(videoId)}/info`);
+    if (!infoRes.ok) {
+      throw new Error(`Could not fetch video info (HTTP ${infoRes.status})`);
+    }
+    const info = await infoRes.json();
+    const totalBytes = Number(info.size_bytes) || 0;
+    const filename = info.filename || `analyzed_${videoId}.mp4`;
+
+    if (totalBytes <= 0) {
+      window.location.href = `/api/videos/${encodeURIComponent(videoId)}/download`;
+      return;
+    }
+
+    const totalMb = (totalBytes / (1024 * 1024)).toFixed(2);
+    const chunksMeta = [];
+    for (let start = 0, idx = 0; start < totalBytes; start += TRANSFER_CHUNK_BYTES, idx++) {
+      const end = Math.min(start + TRANSFER_CHUNK_BYTES, totalBytes);
+      chunksMeta.push({ idx, start, end, size: end - start });
+    }
+
+    const downloadedBlobs = new Array(chunksMeta.length);
+    const chunkLoadedBytes = new Array(chunksMeta.length).fill(0);
+
+    const updateDownloadProgress = () => {
+      const sumBytes = chunkLoadedBytes.reduce((a, b) => a + b, 0);
+      const pct = Math.min(100, Math.round((sumBytes / totalBytes) * 100));
+      const curMb = (sumBytes / (1024 * 1024)).toFixed(2);
+      els.downloadVideoLink.textContent = `⬇ Downloading (${PARALLEL_TRANSFER_THREADS} threads): ${pct}% (${curMb}/${totalMb} MB)`;
+      showToast(
+        `⬇ Downloading (${PARALLEL_TRANSFER_THREADS} parallel threads): ${pct}% (${curMb} / ${totalMb} MB)...`
+      );
+    };
+
+    const fetchChunkWithXhr = (cMeta) =>
+      new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open(
+          "GET",
+          `/api/videos/${encodeURIComponent(videoId)}/chunk?start=${cMeta.start}&end=${cMeta.end}`,
+          true
+        );
+        xhr.responseType = "blob";
+        xhr.onprogress = (evt) => {
+          if (evt.lengthComputable) {
+            chunkLoadedBytes[cMeta.idx] = evt.loaded;
+            updateDownloadProgress();
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            chunkLoadedBytes[cMeta.idx] = cMeta.size;
+            updateDownloadProgress();
+            resolve(xhr.response);
+          } else {
+            reject(new Error(`HTTP ${xhr.status} on download chunk #${cMeta.idx + 1}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error(`Network error on download chunk #${cMeta.idx + 1}`));
+        xhr.send();
+      });
+
+    let nextIdx = 0;
+    const workerCount = Math.min(PARALLEL_TRANSFER_THREADS, chunksMeta.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (nextIdx < chunksMeta.length) {
+        const myMeta = chunksMeta[nextIdx++];
+        let ok = false;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            downloadedBlobs[myMeta.idx] = await fetchChunkWithXhr(myMeta);
+            ok = true;
+            break;
+          } catch (err) {
+            lastErr = err;
+            chunkLoadedBytes[myMeta.idx] = 0;
+            await new Promise((r) => setTimeout(r, 400));
+          }
+        }
+        if (!ok) throw lastErr || new Error("Failed to download video chunk.");
+      }
+    });
+
+    await Promise.all(workers);
+
+    const fullBlob = new Blob(downloadedBlobs, { type: "video/mp4" });
+    const blobUrl = URL.createObjectURL(fullBlob);
+    state.renderedPreviewUrl = blobUrl;
+
+    const tempAnchor = document.createElement("a");
+    tempAnchor.href = blobUrl;
+    tempAnchor.download = filename;
+    document.body.appendChild(tempAnchor);
+    tempAnchor.click();
+    document.body.removeChild(tempAnchor);
+
+    showToast(`✓ Downloaded "${filename}" (${totalMb} MB) using ${workerCount} parallel threads!`);
+  } catch (err) {
+    showToast(`✕ Download failed: ${err.message}`, true);
+  } finally {
+    els.downloadVideoLink.style.pointerEvents = "";
+    els.downloadVideoLink.style.opacity = "";
+    els.downloadVideoLink.textContent = origBtnText;
+  }
+}
+
 async function processAndRenderVideo() {
   if (!state.session) return;
   els.processVideoBtn.disabled = true;
@@ -1284,7 +1404,7 @@ function bindEvents() {
     }
   });
 
-  // Upload Form Submit using 512 KB chunked binary upload (bypasses proxy 1MB limits & multipart rollover stalls)
+  // Upload Form Submit using 8 parallel threads & 5 MB binary chunks
   els.uploadForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const file = els.videoFileInput.files[0];
@@ -1306,13 +1426,16 @@ function bindEvents() {
     const totalBytes = file.size;
     const totalMb = (totalBytes / (1024 * 1024)).toFixed(2);
     els.uploadBtn.textContent = "⏳ Uploading 0%...";
-    showUploadStatus(`⏳ Initializing upload of "${file.name}" (${totalMb} MB)...`);
+    showUploadStatus(
+      `⏳ Initializing ${PARALLEL_TRANSFER_THREADS}-thread upload of "${file.name}" (${totalMb} MB)...`
+    );
 
     try {
-      // 1. Initialize chunked upload session
+      // 1. Initialize parallel chunked upload session & pre-allocate file on server
       const initParams = new URLSearchParams({
         filename: file.name,
         gun_name: gunName,
+        total_bytes: String(totalBytes),
       });
       const initRes = await fetch(`/api/upload/init?${initParams.toString()}`, {
         method: "POST",
@@ -1328,52 +1451,115 @@ function bindEvents() {
       const initData = await initRes.json();
       const { video_id, ext } = initData;
 
-      // 2. Upload in 512 KB binary chunks (< 1 MB so default Nginx client_max_body_size 1m never blocks)
-      const CHUNK_SIZE = 512 * 1024;
-      let offset = 0;
-      while (offset < totalBytes) {
-        const end = Math.min(offset + CHUNK_SIZE, totalBytes);
-        const blobChunk = file.slice(offset, end);
+      // 2. Build 5 MB chunks list and upload across 8 parallel worker threads
+      const chunksMeta = [];
+      for (
+        let offset = 0, idx = 0;
+        offset < totalBytes;
+        offset += TRANSFER_CHUNK_BYTES, idx++
+      ) {
+        const end = Math.min(offset + TRANSFER_CHUNK_BYTES, totalBytes);
+        chunksMeta.push({ idx, offset, end, size: end - offset });
+      }
 
-        let chunkOk = false;
-        let lastErr = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            const chunkRes = await fetch(
-              `/api/upload/chunk/${encodeURIComponent(video_id)}?ext=${encodeURIComponent(ext)}`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/octet-stream" },
-                body: blobChunk,
-              }
-            );
-            if (!chunkRes.ok) {
-              throw new Error(`HTTP ${chunkRes.status} on chunk at ${(offset / (1024 * 1024)).toFixed(2)} MB`);
-            }
-            chunkOk = true;
-            break;
-          } catch (cErr) {
-            lastErr = cErr;
-            await new Promise((r) => setTimeout(r, 400));
-          }
-        }
-        if (!chunkOk) {
-          throw lastErr || new Error("Failed to upload video chunk.");
-        }
+      const chunkProgressBytes = new Array(chunksMeta.length).fill(0);
+      const workerCount = Math.min(PARALLEL_TRANSFER_THREADS, chunksMeta.length);
 
-        offset = end;
-        const pct = Math.min(100, Math.round((offset / totalBytes) * 100));
-        const loadedMb = (offset / (1024 * 1024)).toFixed(2);
+      const updateUploadProgress = () => {
+        const uploadedBytes = chunkProgressBytes.reduce((a, b) => a + b, 0);
+        const pct = Math.min(100, Math.round((uploadedBytes / totalBytes) * 100));
+        const loadedMb = (uploadedBytes / (1024 * 1024)).toFixed(2);
         els.uploadBtn.textContent = `⏳ Uploading ${pct}%`;
         showUploadStatus(
-          `⬆ Uploading to server: ${pct}% (${loadedMb} / ${totalMb} MB)...`
+          `⬆ Uploading (${workerCount} threads, 5 MB chunks): ${pct}% (${loadedMb} / ${totalMb} MB)...`
         );
-      }
+      };
+
+      const sendChunkWithXhr = (cMeta) =>
+        new Promise((resolve, reject) => {
+          const blobChunk = file.slice(cMeta.offset, cMeta.end);
+          const xhr = new XMLHttpRequest();
+          xhr.open(
+            "POST",
+            `/api/upload/chunk/${encodeURIComponent(video_id)}?ext=${encodeURIComponent(ext)}&offset=${cMeta.offset}`,
+            true
+          );
+          xhr.setRequestHeader("Content-Type", "application/octet-stream");
+          xhr.upload.onprogress = (evt) => {
+            if (evt.lengthComputable) {
+              chunkProgressBytes[cMeta.idx] = evt.loaded;
+              updateUploadProgress();
+            }
+          };
+          xhr.onload = async () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              chunkProgressBytes[cMeta.idx] = cMeta.size;
+              updateUploadProgress();
+              resolve();
+            } else if (xhr.status === 413 && cMeta.size > 900 * 1024) {
+              // Auto-fallback: if reverse proxy limits body < 5MB, split this 5MB range into 900KB slices
+              try {
+                const subSize = 900 * 1024;
+                for (let sOff = cMeta.offset; sOff < cMeta.end; sOff += subSize) {
+                  const sEnd = Math.min(sOff + subSize, cMeta.end);
+                  const subRes = await fetch(
+                    `/api/upload/chunk/${encodeURIComponent(video_id)}?ext=${encodeURIComponent(ext)}&offset=${sOff}`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/octet-stream" },
+                      body: file.slice(sOff, sEnd),
+                    }
+                  );
+                  if (!subRes.ok) throw new Error(`HTTP ${subRes.status}`);
+                  chunkProgressBytes[cMeta.idx] = sEnd - cMeta.offset;
+                  updateUploadProgress();
+                }
+                resolve();
+              } catch (subErr) {
+                reject(subErr);
+              }
+            } else {
+              reject(
+                new Error(
+                  `HTTP ${xhr.status} on chunk #${cMeta.idx + 1} (${(cMeta.offset / (1024 * 1024)).toFixed(1)} MB)`
+                )
+              );
+            }
+          };
+          xhr.onerror = () =>
+            reject(new Error(`Network error on chunk #${cMeta.idx + 1}`));
+          xhr.send(blobChunk);
+        });
+
+      let nextChunkIdx = 0;
+      const uploadWorkers = Array.from({ length: workerCount }, async () => {
+        while (nextChunkIdx < chunksMeta.length) {
+          const myMeta = chunksMeta[nextChunkIdx++];
+          let chunkOk = false;
+          let lastErr = null;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              await sendChunkWithXhr(myMeta);
+              chunkOk = true;
+              break;
+            } catch (cErr) {
+              lastErr = cErr;
+              chunkProgressBytes[myMeta.idx] = 0;
+              await new Promise((r) => setTimeout(r, 400));
+            }
+          }
+          if (!chunkOk) {
+            throw lastErr || new Error("Failed to upload video chunk.");
+          }
+        }
+      });
+
+      await Promise.all(uploadWorkers);
 
       // 3. Finalize session (FFmpeg audio extraction & multimodal detection)
       els.uploadBtn.textContent = "⏳ Analyzing on Server...";
       showUploadStatus(
-        `⚙ Upload 100% (${totalMb} MB saved on server). Extracting PCM audio & analyzing...`
+        `⚙ Upload 100% (${totalMb} MB saved via ${workerCount} threads). Extracting PCM audio & analyzing...`
       );
 
       const completeParams = new URLSearchParams({
@@ -1494,6 +1680,9 @@ function bindEvents() {
     els.checkAccuracyBtn.addEventListener("click", checkModelAccuracy);
   }
   els.processVideoBtn.addEventListener("click", processAndRenderVideo);
+  if (els.downloadVideoLink) {
+    els.downloadVideoLink.addEventListener("click", downloadRenderedVideoParallel);
+  }
 
   // Firearm Manager Modal Controls
   const openModal = () => {

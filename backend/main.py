@@ -1,12 +1,13 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
+import threading
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from backend.analytics import compute_analytics
@@ -280,10 +281,14 @@ def _finalize_uploaded_video_session(
     }
 
 
+_UPLOAD_WRITE_LOCK = threading.Lock()
+
+
 @app.post("/api/upload/init")
 def init_chunked_upload(
     filename: str = Query("practice.mp4"),
     gun_name: str = Query(...),
+    total_bytes: int = Query(0),
     storage: StorageManager = Depends(get_storage),
     cfg: AppConfig = Depends(get_app_config),
 ) -> Dict[str, Any]:
@@ -307,14 +312,20 @@ def init_chunked_upload(
     video_id = uuid.uuid4().hex[:12]
     video_path = storage.uploads_dir / f"{video_id}{ext}"
     video_path.parent.mkdir(parents=True, exist_ok=True)
-    video_path.write_bytes(b"")
-    print(f"[Upload {video_id}] Initialized chunked upload for '{orig_filename}' ({cleaned_gun})", flush=True)
+    with video_path.open("wb") as f:
+        if total_bytes > 0:
+            f.truncate(total_bytes)
+    print(
+        f"[Upload {video_id}] Initialized parallel chunked upload for '{orig_filename}' ({total_bytes / (1024 * 1024):.2f} MB, {cleaned_gun})",
+        flush=True,
+    )
 
     return {
         "video_id": video_id,
         "ext": ext,
         "filename": orig_filename,
         "gun_name": cleaned_gun,
+        "total_bytes": total_bytes,
     }
 
 
@@ -323,6 +334,7 @@ async def append_upload_chunk(
     video_id: str,
     request: Request,
     ext: str = Query(".mp4"),
+    offset: Optional[int] = Query(None),
     storage: StorageManager = Depends(get_storage),
 ) -> Dict[str, Any]:
     safe_ext = ext.lower() if ext.lower() in ALLOWED_EXTENSIONS else ".mp4"
@@ -330,16 +342,22 @@ async def append_upload_chunk(
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Upload session not initialized.")
 
+    # Receive chunk over the network asynchronously (runs in parallel across all 8 connections)
     chunk = await request.body()
     if chunk:
-        with video_path.open("ab") as f:
-            f.write(chunk)
+        with _UPLOAD_WRITE_LOCK:
+            if offset is not None:
+                with video_path.open("r+b") as f:
+                    f.seek(offset)
+                    f.write(chunk)
+            else:
+                with video_path.open("ab") as f:
+                    f.write(chunk)
 
-    total_bytes = video_path.stat().st_size
     return {
         "video_id": video_id,
         "received_bytes": len(chunk),
-        "total_bytes": total_bytes,
+        "offset": offset,
     }
 
 
@@ -685,6 +703,49 @@ def get_output_media(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Output media file not found")
     return FileResponse(path=str(file_path), media_type="video/mp4")
+
+
+@app.get("/api/videos/{video_id}/info")
+def get_rendered_video_info(
+    video_id: str, storage: StorageManager = Depends(get_storage)
+) -> Dict[str, Any]:
+    session = storage.get_session(video_id)
+    output_path = storage.outputs_dir / f"{video_id}_annotated.mp4"
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Rendered video not found")
+
+    safe_gun = (
+        session.gun_name.replace(" ", "_").lower() if session else "practice"
+    )
+    download_name = f"{safe_gun}_{video_id}_analyzed.mp4"
+    return {
+        "video_id": video_id,
+        "size_bytes": output_path.stat().st_size,
+        "filename": download_name,
+    }
+
+
+@app.get("/api/videos/{video_id}/chunk")
+def download_rendered_video_chunk(
+    video_id: str,
+    start: int = Query(0, ge=0),
+    end: int = Query(..., gt=0),
+    storage: StorageManager = Depends(get_storage),
+) -> Response:
+    output_path = storage.outputs_dir / f"{video_id}_annotated.mp4"
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Rendered video not found")
+
+    file_size = output_path.stat().st_size
+    safe_start = min(start, file_size)
+    safe_end = min(end, file_size)
+    length = max(0, safe_end - safe_start)
+
+    with output_path.open("rb") as f:
+        f.seek(safe_start)
+        data = f.read(length)
+
+    return Response(content=data, media_type="application/octet-stream")
 
 
 @app.get("/api/videos/{video_id}/download")
