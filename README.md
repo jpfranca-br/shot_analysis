@@ -1,6 +1,6 @@
 # Shooting Practice Video Analyzer (`shot_analysis`)
 
-A web-based application designed for firearms practitioners to analyze training sessions. By combining **acoustic signature recognition** (`librosa`), **interactive waveform annotation** (`WaveSurfer.js`), and **automated transient detection**, the system identifies shot-timer beeps and gunshots within practice videos, computes precise draw and split times, and generates downloadable `.mp4` videos with burnt-in performance overlays (`opencv-python`).
+A web-based application designed for firearms practitioners to analyze training sessions. By combining **acoustic signature recognition** (`librosa`), **interactive waveform annotation** (`WaveSurfer.js`), and **automated transient detection**, the system identifies shot-timer beeps and gunshots within practice videos, computes precise draw and split times, and generates downloadable `.mp4` videos with burnt-in performance overlays (`opencv-python-headless`).
 
 ---
 
