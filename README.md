@@ -10,7 +10,9 @@ A web-based application designed for firearms practitioners to analyze training 
   - **Default Firearms Included:** Pre-configured with **CZ P-10C 9mm**, **T4 5.56x45mm**, and **CBC 7022 .22LR**.
   - **Firearm & Signature Model Manager:** Built-in UI manager (`⚙ Manage Firearms & Signatures`) to add new firearms, rename or edit acoustic parameters (Beep Frequency Hz, Duration ms, Shot Decay Rate dB/s), reset a learned signature back to Cold Start, remove firearms, or restore defaults.
   - **Cold Start (Training Mode):** When a new firearm model is used for the first time, manually annotate the timer beep and gunshots on the interactive waveform to train its acoustic profile.
-  - **Automated Detection Mode:** Once a profile exists for a firearm, future uploads automatically detect the timer beep ($t = 0.00\text{s}$) and gunshot timestamps using STFT narrowband tonal matching, onset strength envelopes, and MFCC cosine similarity.
+  - **Automated Detection Mode (Dual-Regime + Reverb-Subtracted HF Flux):** Once a profile exists for a firearm, future uploads automatically detect the timer beep ($t = 0.00\text{s}$) and gunshot timestamps using:
+    - **Reverb-Subtracted High-Frequency Spectral Flux ($1.8\text{–}10.5\text{ kHz}$):** Causal leaky-integrator reverberation floor subtraction and positive log-RMS attack tracking to unmask rapid follow-up shots riding on heavy indoor range reverberation tails.
+    - **Dual-Regime Acoustic Signatures:** Separately models and matches **Isolated / First Shots** ($\Delta t > 0.85\text{s}$) and **Rapid Follow-up Shots** ($\Delta t \le 0.85\text{s}$, with pre-shot reverberation spectrum subtraction).
   - **Continuous Profile Refinement:** Every time you confirm or adjust markers, the firearm's acoustic signature vector (`signatures.json`) is refined and versioned (`v1`, `v2`, ...).
 - **Synchronized Video & 60fps Waveform Editor**
   - HTML5 video player locked in sync with an interactive **WaveSurfer.js v7** waveform and timeline ruler.

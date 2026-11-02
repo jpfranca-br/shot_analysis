@@ -208,7 +208,11 @@ function renderFirearmManagerTable() {
       ? `<span class="status-badge badge-automated">Trained v${sig.signature_version}</span>`
       : `<span class="status-badge badge-training">Cold Start (v0)</span>`;
     const beepInfo = `${Number(sig.beep_profile.frequency_hz).toFixed(0)} Hz / ${sig.beep_profile.duration_ms} ms`;
-    const shotInfo = `${Number(sig.shot_profile.decay_rate).toFixed(1)} dB/s`;
+    const hfRatio =
+      sig.shot_profile.hf_flux_ratio !== undefined
+        ? `${Math.round(sig.shot_profile.hf_flux_ratio * 100)}% HF`
+        : "";
+    const shotInfo = `${Number(sig.shot_profile.decay_rate).toFixed(1)} dB/s${hfRatio ? ` • ${hfRatio}` : ""}`;
     const updatedDate = sig.updated_at
       ? new Date(sig.updated_at).toLocaleString()
       : "--";
@@ -435,9 +439,16 @@ function renderSignatureUI() {
   els.sigGunName.textContent = state.session.gun_name;
 
   if (state.signature) {
-    els.sigVersion.textContent = `v${state.signature.signature_version}`;
+    const hasDual =
+      Array.isArray(state.signature.shot_profile.followup_features) &&
+      state.signature.shot_profile.followup_features.some((x) => Math.abs(x) > 1e-6);
+    els.sigVersion.textContent = `v${state.signature.signature_version} (${hasDual ? "Dual-Regime" : "Trained"})`;
     els.sigBeepMeta.textContent = `${state.signature.beep_profile.frequency_hz.toFixed(0)} Hz / ${state.signature.beep_profile.duration_ms} ms`;
-    els.sigShotMeta.textContent = `${state.signature.shot_profile.decay_rate.toFixed(1)} dB/s`;
+    const hfPct =
+      state.signature.shot_profile.hf_flux_ratio !== undefined
+        ? ` • HF Flux ${Math.round(state.signature.shot_profile.hf_flux_ratio * 100)}%`
+        : "";
+    els.sigShotMeta.textContent = `${state.signature.shot_profile.decay_rate.toFixed(1)} dB/s${hfPct}`;
     els.signatureBadge.textContent = `${state.session.gun_name} • Signature v${state.signature.signature_version}`;
     els.signatureBadge.className = "status-badge badge-automated";
   } else {

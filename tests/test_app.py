@@ -121,6 +121,9 @@ def test_full_workflow_cold_start_learning_automated_and_rendering(
     assert len(sig_v1["beep_profile"]["features"]) == 16
     assert sig_v1["shot_profile"]["decay_rate"] > 0
     assert len(sig_v1["shot_profile"]["features"]) == 16
+    assert len(sig_v1["shot_profile"]["isolated_features"]) == 16
+    assert len(sig_v1["shot_profile"]["followup_features"]) == 16
+    assert 0.0 <= sig_v1["shot_profile"]["hf_flux_ratio"] <= 1.0
 
     # Check Module 4 Analytics & Split Calculation (FR-4.1)
     analytics = ann_data["analytics"]

@@ -11,7 +11,19 @@ class BeepProfile(BaseModel):
 
 class ShotProfile(BaseModel):
     decay_rate: float = Field(..., description="Envelope log-RMS decay rate (dB/s or slope)")
-    features: List[float] = Field(default_factory=list, description="Normalized acoustic feature vector")
+    features: List[float] = Field(default_factory=list, description="Combined normalized acoustic feature vector")
+    isolated_features: List[float] = Field(
+        default_factory=list,
+        description="Reverb-subtracted acoustic feature vector for isolated / first shots (split > 0.85s)",
+    )
+    followup_features: List[float] = Field(
+        default_factory=list,
+        description="Reverb-subtracted acoustic feature vector for rapid follow-up shots (split <= 0.85s)",
+    )
+    hf_flux_ratio: float = Field(
+        default=0.5,
+        description="Characteristic high-frequency (1.8-10.5 kHz) positive spectral flux ratio",
+    )
 
 
 class FirearmAudioSignature(BaseModel):
