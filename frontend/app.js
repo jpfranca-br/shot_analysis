@@ -41,7 +41,6 @@ const els = {
   hudShotSplit: document.getElementById("hudShotSplit"),
   hudShotElapsed: document.getElementById("hudShotElapsed"),
   waveformContainer: document.getElementById("waveformContainer"),
-  waveformTimeline: document.getElementById("waveformTimeline"),
   zoomSlider: document.getElementById("zoomSlider"),
   playPauseBtn: document.getElementById("playPauseBtn"),
   stopBtn: document.getElementById("stopBtn"),
@@ -316,13 +315,34 @@ function selectMarker(marker, seekToMarker = false) {
     ) {
       targetTime = state.shotTimestamps[marker.index];
     }
-    if (targetTime !== null && state.wavesurfer.getDuration() > 0) {
+    if (targetTime !== null) {
       els.practiceVideo.currentTime = targetTime;
     }
   }
 
-  syncWaveformMarkers();
+  updateMarkerHighlightColors();
   renderAnalyticsUI();
+}
+
+function updateMarkerHighlightColors() {
+  if (!state.regionsPlugin) return;
+  const regions = state.regionsPlugin.getRegions();
+  regions.forEach((reg) => {
+    if (reg.id === "beep") {
+      const isSel = state.selectedMarker?.type === "beep";
+      reg.setOptions({
+        color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(245, 158, 11, 0.95)",
+      });
+    } else if (reg.id.startsWith("shot-")) {
+      const idx = parseInt(reg.id.replace("shot-", ""), 10);
+      const isSel =
+        state.selectedMarker?.type === "shot" &&
+        state.selectedMarker?.index === idx;
+      reg.setOptions({
+        color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(6, 182, 212, 0.95)",
+      });
+    }
+  });
 }
 
 function syncWaveformMarkers() {
@@ -420,19 +440,57 @@ function updateLiveVideoHud(currentTime) {
   }
 }
 
-function initWaveSurfer(session) {
+async function decodeAudioPeaks(audioUrl, targetBuckets = 3000) {
+  const res = await fetch(audioUrl);
+  const arrayBuf = await res.arrayBuffer();
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioCtx();
+  try {
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+    const rawData = audioBuffer.getChannelData(0);
+    const total = rawData.length;
+    const buckets = Math.min(targetBuckets, Math.max(500, total));
+    const blockSize = Math.floor(total / buckets) || 1;
+    const peaks = new Float32Array(buckets);
+
+    for (let i = 0; i < buckets; i++) {
+      const start = i * blockSize;
+      let maxVal = 0;
+      for (let j = 0; j < blockSize && start + j < total; j++) {
+        const v = Math.abs(rawData[start + j]);
+        if (v > maxVal) maxVal = v;
+      }
+      peaks[i] = maxVal;
+    }
+    return { peaks: Array.from(peaks), duration: audioBuffer.duration };
+  } finally {
+    if (audioCtx.state !== "closed") {
+      audioCtx.close().catch(() => {});
+    }
+  }
+}
+
+async function initWaveSurfer(session) {
   if (state.wavesurfer) {
     state.wavesurfer.destroy();
     state.wavesurfer = null;
   }
 
+  els.waveformContainer.innerHTML = "";
+  els.zoomSlider.value = "0";
   els.videoPlaceholder.hidden = true;
   els.practiceVideo.src = session.video_url;
   els.practiceVideo.load();
 
+  let decoded = null;
+  try {
+    decoded = await decodeAudioPeaks(session.audio_url);
+  } catch (err) {
+    console.warn("Audio peak decode fallback:", err);
+  }
+
   const regions = WaveSurfer.Regions.create();
   const timeline = WaveSurfer.Timeline.create({
-    container: els.waveformTimeline,
     height: 22,
     style: {
       fontSize: "11px",
@@ -442,9 +500,9 @@ function initWaveSurfer(session) {
 
   state.regionsPlugin = regions;
 
-  const ws = WaveSurfer.create({
+  const wsOptions = {
     container: els.waveformContainer,
-    height: 128,
+    height: 118,
     waveColor: "#38bdf8",
     progressColor: "#0284c7",
     cursorColor: "#f8fafc",
@@ -453,15 +511,23 @@ function initWaveSurfer(session) {
     barGap: 1,
     barRadius: 2,
     normalize: true,
-    minPxPerSec: Number(els.zoomSlider.value) || 40,
+    fillParent: true,
+    minPxPerSec: 0,
+    autoScroll: true,
+    autoCenter: false,
     media: els.practiceVideo,
-    url: session.audio_url,
     plugins: [regions, timeline],
-  });
+  };
 
+  if (decoded && decoded.peaks.length > 0) {
+    wsOptions.peaks = [decoded.peaks];
+    wsOptions.duration = decoded.duration || session.duration_sec;
+  }
+
+  const ws = WaveSurfer.create(wsOptions);
   state.wavesurfer = ws;
 
-  ws.on("ready", () => {
+  const onReady = () => {
     const dur = ws.getDuration() || session.duration_sec || 0;
     els.durationDisplay.textContent = `${dur.toFixed(3)}s`;
     els.playPauseBtn.disabled = false;
@@ -475,7 +541,9 @@ function initWaveSurfer(session) {
 
     syncWaveformMarkers();
     renderAnalyticsUI();
-  });
+  };
+
+  ws.on("ready", onReady);
 
   ws.on("timeupdate", (currentTime) => {
     els.currentTimeDisplay.textContent = `${currentTime.toFixed(3)}s`;
@@ -508,14 +576,22 @@ function initWaveSurfer(session) {
 
     if (region.id === "beep") {
       state.beepTimestamp = newTime;
-      selectMarker({ type: "beep" }, false);
+      state.selectedMarker = { type: "beep" };
+      els.deleteMarkerBtn.disabled = false;
+      updateMarkerHighlightColors();
+      renderAnalyticsUI();
     } else if (region.id.startsWith("shot-")) {
       const idx = parseInt(region.id.replace("shot-", ""), 10);
       if (state.shotTimestamps[idx] !== undefined) {
         state.shotTimestamps[idx] = newTime;
         state.shotTimestamps.sort((a, b) => a - b);
         const newIdx = state.shotTimestamps.indexOf(newTime);
-        selectMarker({ type: "shot", index: Math.max(0, newIdx) }, false);
+        state.selectedMarker = { type: "shot", index: Math.max(0, newIdx) };
+        els.deleteMarkerBtn.disabled = false;
+        requestAnimationFrame(() => {
+          syncWaveformMarkers();
+          renderAnalyticsUI();
+        });
       }
     }
   });
@@ -552,7 +628,10 @@ function setBeepAtPlayhead() {
   const now = Number((els.practiceVideo.currentTime || 0).toFixed(3));
   state.beepTimestamp = now;
   state.userModified = true;
-  selectMarker({ type: "beep" }, false);
+  state.selectedMarker = { type: "beep" };
+  els.deleteMarkerBtn.disabled = false;
+  syncWaveformMarkers();
+  renderAnalyticsUI();
   showToast(`Timer Beep anchor set at ${now.toFixed(3)}s`);
 }
 
@@ -563,7 +642,10 @@ function addShotAtPlayhead() {
   state.shotTimestamps.sort((a, b) => a - b);
   const idx = state.shotTimestamps.indexOf(now);
   state.userModified = true;
-  selectMarker({ type: "shot", index: Math.max(0, idx) }, false);
+  state.selectedMarker = { type: "shot", index: Math.max(0, idx) };
+  els.deleteMarkerBtn.disabled = false;
+  syncWaveformMarkers();
+  renderAnalyticsUI();
   showToast(`Added Shot #${idx + 1} at ${now.toFixed(3)}s`);
 }
 
