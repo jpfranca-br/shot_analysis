@@ -5,8 +5,9 @@ const state = {
   session: null,
   signature: null,
   beepTimestamp: null,
+  endBeepTimestamp: null,
   shotTimestamps: [],
-  selectedMarker: null, // { type: 'beep' } or { type: 'shot', index: number }
+  selectedMarker: null, // { type: 'beep' } | { type: 'end-beep' } | { type: 'shot', index: number }
   userModified: false,
   wavesurfer: null,
   regionsPlugin: null,
@@ -49,6 +50,7 @@ const els = {
   durationDisplay: document.getElementById("durationDisplay"),
   stageTimeDisplay: document.getElementById("stageTimeDisplay"),
   addBeepBtn: document.getElementById("addBeepBtn"),
+  addEndBeepBtn: document.getElementById("addEndBeepBtn"),
   addShotBtn: document.getElementById("addShotBtn"),
   deleteMarkerBtn: document.getElementById("deleteMarkerBtn"),
   kpiDrawTime: document.getElementById("kpiDrawTime"),
@@ -295,13 +297,31 @@ function renderFirearmManagerTable() {
   });
 }
 
+function ensureBeepOrder() {
+  if (
+    state.beepTimestamp !== null &&
+    state.endBeepTimestamp !== null &&
+    Number(state.endBeepTimestamp) < Number(state.beepTimestamp)
+  ) {
+    const tmp = state.beepTimestamp;
+    state.beepTimestamp = state.endBeepTimestamp;
+    state.endBeepTimestamp = tmp;
+  }
+}
+
 // Compute client-side analytics (FR-4.1)
 function computeClientAnalytics() {
+  ensureBeepOrder();
   const beep =
     state.beepTimestamp !== null ? Number(state.beepTimestamp) : null;
+  const endBeep =
+    state.endBeepTimestamp !== null ? Number(state.endBeepTimestamp) : null;
   const sortedShots = [...state.shotTimestamps]
     .map((t) => Number(t))
     .sort((a, b) => a - b);
+
+  let shotsBeforeLimit = 0;
+  let shotsAfterLimit = 0;
 
   const shots = sortedShots.map((t, idx) => {
     const elapsed = beep !== null ? Number((t - beep).toFixed(3)) : null;
@@ -311,11 +331,18 @@ function computeClientAnalytics() {
     } else {
       split = Number((t - sortedShots[idx - 1]).toFixed(3));
     }
+    const withinTimeLimit = endBeep !== null ? t <= endBeep : true;
+    if (withinTimeLimit) {
+      shotsBeforeLimit += 1;
+    } else {
+      shotsAfterLimit += 1;
+    }
     return {
       shotNumber: idx + 1,
       timestamp: Number(t.toFixed(3)),
       splitTime: split,
       elapsedTime: elapsed,
+      withinTimeLimit,
     };
   });
 
@@ -326,6 +353,10 @@ function computeClientAnalytics() {
   const totalStageTime =
     beep !== null && sortedShots.length > 0
       ? Number((sortedShots[sortedShots.length - 1] - beep).toFixed(3))
+      : null;
+  const timeLimitDuration =
+    beep !== null && endBeep !== null
+      ? Number((endBeep - beep).toFixed(3))
       : null;
 
   let avgSplit = null;
@@ -344,10 +375,14 @@ function computeClientAnalytics() {
 
   return {
     beepTimestamp: beep,
+    endBeepTimestamp: endBeep,
+    timeLimitDuration,
     drawTime,
     totalStageTime,
     avgSplit,
     totalShots: shots.length,
+    shotsBeforeLimit,
+    shotsAfterLimit,
     shots,
   };
 }
@@ -363,15 +398,23 @@ function renderAnalyticsUI() {
       : "--";
   els.kpiAvgSplit.textContent =
     metrics.avgSplit !== null ? `${metrics.avgSplit.toFixed(2)}s` : "--";
-  els.kpiShotCount.textContent = `${metrics.totalShots} Shot${metrics.totalShots === 1 ? "" : "s"}`;
+  if (metrics.endBeepTimestamp !== null) {
+    els.kpiShotCount.textContent = `${metrics.shotsBeforeLimit} In Limit • ${metrics.shotsAfterLimit} Overtime`;
+  } else {
+    els.kpiShotCount.textContent = `${metrics.totalShots} Shot${metrics.totalShots === 1 ? "" : "s"}`;
+  }
 
   // Populate Table
   els.splitsTableBody.innerHTML = "";
 
-  if (metrics.beepTimestamp === null && metrics.shots.length === 0) {
+  if (
+    metrics.beepTimestamp === null &&
+    metrics.endBeepTimestamp === null &&
+    metrics.shots.length === 0
+  ) {
     els.splitsTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="5">No markers placed yet. Press <kbd>B</kbd> for Beep and <kbd>S</kbd> for Shots.</td>
+        <td colspan="5">No markers placed yet. Press <kbd>B</kbd> for Start Beep, <kbd>L</kbd> for Time Limit, and <kbd>S</kbd> for Shots.</td>
       </tr>`;
     return;
   }
@@ -382,7 +425,7 @@ function renderAnalyticsUI() {
       tr.classList.add("active-row");
     }
     tr.innerHTML = `
-      <td><strong style="color:#fbbf24">⏱ Beep</strong></td>
+      <td><strong style="color:#fbbf24">⏱ Start Beep</strong></td>
       <td>${metrics.beepTimestamp.toFixed(3)}s</td>
       <td>--</td>
       <td>0.000s</td>
@@ -402,7 +445,50 @@ function renderAnalyticsUI() {
     els.splitsTableBody.appendChild(tr);
   }
 
+  const appendEndBeepRow = () => {
+    if (metrics.endBeepTimestamp === null) return;
+    const tr = document.createElement("tr");
+    if (state.selectedMarker && state.selectedMarker.type === "end-beep") {
+      tr.classList.add("active-row");
+    }
+    const limitElapsed =
+      metrics.timeLimitDuration !== null
+        ? `Limit ${metrics.timeLimitDuration.toFixed(3)}s`
+        : "--";
+    tr.innerHTML = `
+      <td><strong style="color:#c084fc">⌛ Time Limit</strong></td>
+      <td>${metrics.endBeepTimestamp.toFixed(3)}s</td>
+      <td>--</td>
+      <td><strong style="color:#c084fc">${limitElapsed}</strong></td>
+      <td><button type="button" class="btn btn-xs btn-danger" data-del-end-beep="true">✕</button></td>
+    `;
+    tr.addEventListener("click", (e) => {
+      if (e.target.closest("[data-del-end-beep]")) {
+        state.endBeepTimestamp = null;
+        if (state.selectedMarker?.type === "end-beep")
+          state.selectedMarker = null;
+        state.userModified = true;
+        syncWaveformMarkers();
+        renderAnalyticsUI();
+        return;
+      }
+      selectMarker({ type: "end-beep" }, true);
+    });
+    els.splitsTableBody.appendChild(tr);
+  };
+
+  let endBeepInserted = false;
+
   metrics.shots.forEach((s, idx) => {
+    if (
+      !endBeepInserted &&
+      metrics.endBeepTimestamp !== null &&
+      s.timestamp > metrics.endBeepTimestamp
+    ) {
+      appendEndBeepRow();
+      endBeepInserted = true;
+    }
+
     const tr = document.createElement("tr");
     if (
       state.selectedMarker &&
@@ -420,11 +506,20 @@ function renderAnalyticsUI() {
     const elapsedStr =
       s.elapsedTime !== null ? `${s.elapsedTime.toFixed(3)}s` : "--";
 
+    // Color-code shots before vs after time limit
+    const shotColor = s.withinTimeLimit ? "#34d399" : "#fb923c";
+    const statusBadge =
+      metrics.endBeepTimestamp !== null
+        ? s.withinTimeLimit
+          ? `<span style="font-size:0.7rem;color:#34d399;margin-left:4px;">✓ In Limit</span>`
+          : `<span style="font-size:0.7rem;color:#fb923c;margin-left:4px;">⏰ Overtime</span>`
+        : "";
+
     tr.innerHTML = `
-      <td><strong style="color:#67e8f9">Shot #${s.shotNumber}</strong></td>
+      <td><strong style="color:${shotColor}">Shot #${s.shotNumber}</strong>${statusBadge}</td>
       <td>${s.timestamp.toFixed(3)}s</td>
       <td>${splitStr}</td>
-      <td>${elapsedStr}</td>
+      <td style="color:${shotColor};font-weight:600">${elapsedStr}</td>
       <td><button type="button" class="btn btn-xs btn-danger" data-del-shot="${idx}">✕</button></td>
     `;
     tr.addEventListener("click", (e) => {
@@ -440,6 +535,10 @@ function renderAnalyticsUI() {
     });
     els.splitsTableBody.appendChild(tr);
   });
+
+  if (!endBeepInserted && metrics.endBeepTimestamp !== null) {
+    appendEndBeepRow();
+  }
 }
 
 function renderSignatureUI() {
@@ -497,6 +596,8 @@ function selectMarker(marker, seekToMarker = false) {
     let targetTime = null;
     if (marker.type === "beep") {
       targetTime = state.beepTimestamp;
+    } else if (marker.type === "end-beep") {
+      targetTime = state.endBeepTimestamp;
     } else if (
       marker.type === "shot" &&
       state.shotTimestamps[marker.index] !== undefined
@@ -512,6 +613,16 @@ function selectMarker(marker, seekToMarker = false) {
   renderAnalyticsUI();
 }
 
+function getShotRegionColor(shotTime, isSelected) {
+  if (isSelected) return "rgba(244, 63, 94, 0.95)";
+  if (state.endBeepTimestamp !== null) {
+    return Number(shotTime) <= Number(state.endBeepTimestamp)
+      ? "rgba(16, 185, 129, 0.95)" // Emerald Green (Before Time Limit)
+      : "rgba(249, 115, 22, 0.95)"; // Orange (After Time Limit / Overtime)
+  }
+  return "rgba(16, 185, 129, 0.95)";
+}
+
 function updateMarkerHighlightColors() {
   if (!state.regionsPlugin) return;
   const regions = state.regionsPlugin.getRegions();
@@ -521,13 +632,19 @@ function updateMarkerHighlightColors() {
       reg.setOptions({
         color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(245, 158, 11, 0.95)",
       });
+    } else if (reg.id === "end-beep") {
+      const isSel = state.selectedMarker?.type === "end-beep";
+      reg.setOptions({
+        color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(168, 85, 247, 0.95)",
+      });
     } else if (reg.id.startsWith("shot-")) {
       const idx = parseInt(reg.id.replace("shot-", ""), 10);
       const isSel =
         state.selectedMarker?.type === "shot" &&
         state.selectedMarker?.index === idx;
+      const shotTime = state.shotTimestamps[idx] ?? reg.start;
       reg.setOptions({
-        color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(6, 182, 212, 0.95)",
+        color: getShotRegionColor(shotTime, isSel),
       });
     }
   });
@@ -538,34 +655,60 @@ function syncWaveformMarkers() {
   state.isSyncingRegions = true;
   state.regionsPlugin.clearRegions();
 
+  ensureBeepOrder();
+
   // Sort shots ascending
   state.shotTimestamps = [...state.shotTimestamps]
     .map((t) => Number(Number(t).toFixed(3)))
     .sort((a, b) => a - b);
 
-  // Add Beep Marker
+  // Add Start Beep Marker
   if (state.beepTimestamp !== null) {
     const isSel = state.selectedMarker?.type === "beep";
     state.regionsPlugin.addRegion({
       id: "beep",
       start: state.beepTimestamp,
-      content: "⏱ BEEP (0.00s)",
+      content: "⏱ START (0.00s)",
       color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(245, 158, 11, 0.95)",
       drag: true,
       resize: false,
     });
   }
 
-  // Add Shot Markers
+  // Add 2nd Beep (Time Limit) Marker
+  if (state.endBeepTimestamp !== null) {
+    const isSel = state.selectedMarker?.type === "end-beep";
+    const relLim =
+      state.beepTimestamp !== null
+        ? `+${(state.endBeepTimestamp - state.beepTimestamp).toFixed(2)}s`
+        : `${state.endBeepTimestamp.toFixed(2)}s`;
+    state.regionsPlugin.addRegion({
+      id: "end-beep",
+      start: state.endBeepTimestamp,
+      content: `⌛ LIMIT (${relLim})`,
+      color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(168, 85, 247, 0.95)",
+      drag: true,
+      resize: false,
+    });
+  }
+
+  // Add Shot Markers (color-coded for before vs after Time Limit)
   state.shotTimestamps.forEach((shotTime, idx) => {
     const isSel =
       state.selectedMarker?.type === "shot" &&
       state.selectedMarker?.index === idx;
+    const hasLimit = state.endBeepTimestamp !== null;
+    const inLimit = hasLimit ? shotTime <= state.endBeepTimestamp : true;
+    const label = hasLimit
+      ? inLimit
+        ? `S${idx + 1} ✓`
+        : `S${idx + 1} ⏰`
+      : `S${idx + 1}`;
     state.regionsPlugin.addRegion({
       id: `shot-${idx}`,
       start: shotTime,
-      content: `S${idx + 1}`,
-      color: isSel ? "rgba(244, 63, 94, 0.95)" : "rgba(6, 182, 212, 0.95)",
+      content: label,
+      color: getShotRegionColor(shotTime, isSel),
       drag: true,
       resize: false,
     });
@@ -583,13 +726,29 @@ function updateLiveVideoHud(currentTime) {
 
   const metrics = computeClientAnalytics();
 
-  // Timer Beep HUD indicator
+  // Start Beep or Time Limit Beep HUD indicator
   if (
     metrics.beepTimestamp !== null &&
     currentTime >= metrics.beepTimestamp &&
     currentTime <= metrics.beepTimestamp + 1.25
   ) {
     els.hudBeepBanner.hidden = false;
+    els.hudBeepBanner.style.borderColor = "#f59e0b";
+    els.hudBeepBanner.style.color = "#fde68a";
+    els.hudBeepBanner.innerHTML = `<span class="pulse-dot" style="background:#f59e0b"></span> START BEEP | t = 0.00s`;
+  } else if (
+    metrics.endBeepTimestamp !== null &&
+    currentTime >= metrics.endBeepTimestamp &&
+    currentTime <= metrics.endBeepTimestamp + 1.25
+  ) {
+    const limRel =
+      metrics.timeLimitDuration !== null
+        ? `+${metrics.timeLimitDuration.toFixed(2)}s`
+        : `${metrics.endBeepTimestamp.toFixed(2)}s`;
+    els.hudBeepBanner.hidden = false;
+    els.hudBeepBanner.style.borderColor = "#a855f7";
+    els.hudBeepBanner.style.color = "#e9d5ff";
+    els.hudBeepBanner.innerHTML = `<span class="pulse-dot" style="background:#a855f7"></span> TIME LIMIT BEEP | ${limRel}`;
   } else {
     els.hudBeepBanner.hidden = true;
   }
@@ -604,7 +763,16 @@ function updateLiveVideoHud(currentTime) {
 
   if (activeShot) {
     els.hudShotCard.hidden = false;
-    els.hudShotNumber.textContent = `SHOT #${activeShot.shotNumber}`;
+    const hasLimit = metrics.endBeepTimestamp !== null;
+    const inLimit = activeShot.withinTimeLimit;
+    els.hudShotCard.style.borderColor = inLimit ? "#10b981" : "#f97316";
+    els.hudShotNumber.style.color = inLimit ? "#34d399" : "#fb923c";
+    const statusSuffix = hasLimit
+      ? inLimit
+        ? " • ✓ IN LIMIT"
+        : " • ⏰ OVERTIME"
+      : "";
+    els.hudShotNumber.textContent = `SHOT #${activeShot.shotNumber}${statusSuffix}`;
     els.hudShotSplit.textContent =
       activeShot.splitTime !== null
         ? activeShot.shotNumber === 1
@@ -725,6 +893,7 @@ async function initWaveSurfer(session) {
     els.speedSelect.disabled = false;
     els.zoomSlider.disabled = false;
     els.addBeepBtn.disabled = false;
+    if (els.addEndBeepBtn) els.addEndBeepBtn.disabled = false;
     els.addShotBtn.disabled = false;
     els.saveProfileBtn.disabled = false;
     if (els.checkAccuracyBtn) els.checkAccuracyBtn.disabled = false;
@@ -754,6 +923,8 @@ async function initWaveSurfer(session) {
     e.stopPropagation();
     if (region.id === "beep") {
       selectMarker({ type: "beep" }, true);
+    } else if (region.id === "end-beep") {
+      selectMarker({ type: "end-beep" }, true);
     } else if (region.id.startsWith("shot-")) {
       const idx = parseInt(region.id.replace("shot-", ""), 10);
       selectMarker({ type: "shot", index: idx }, true);
@@ -769,8 +940,18 @@ async function initWaveSurfer(session) {
       state.beepTimestamp = newTime;
       state.selectedMarker = { type: "beep" };
       els.deleteMarkerBtn.disabled = false;
-      updateMarkerHighlightColors();
-      renderAnalyticsUI();
+      requestAnimationFrame(() => {
+        syncWaveformMarkers();
+        renderAnalyticsUI();
+      });
+    } else if (region.id === "end-beep") {
+      state.endBeepTimestamp = newTime;
+      state.selectedMarker = { type: "end-beep" };
+      els.deleteMarkerBtn.disabled = false;
+      requestAnimationFrame(() => {
+        syncWaveformMarkers();
+        renderAnalyticsUI();
+      });
     } else if (region.id.startsWith("shot-")) {
       const idx = parseInt(region.id.replace("shot-", ""), 10);
       if (state.shotTimestamps[idx] !== undefined) {
@@ -792,6 +973,10 @@ function handleSessionLoaded(payload) {
   state.session = payload.session;
   state.signature = payload.signature;
   state.beepTimestamp = payload.session.beep_timestamp;
+  state.endBeepTimestamp =
+    payload.session.end_beep_timestamp !== undefined
+      ? payload.session.end_beep_timestamp
+      : null;
   state.shotTimestamps = payload.session.shot_timestamps || [];
   state.selectedMarker = null;
   state.userModified = false;
@@ -804,9 +989,13 @@ function handleSessionLoaded(payload) {
   els.deleteMarkerBtn.disabled = true;
 
   if (state.session.mode === "automated") {
-    els.editorStatusText.textContent = `Automated detection completed using "${state.session.gun_name}" profile (v${state.session.signature_version}). Review or drag markers to refine.`;
+    const limitNote =
+      state.endBeepTimestamp !== null
+        ? ` (Start Beep + Time Limit Beep detected)`
+        : "";
+    els.editorStatusText.textContent = `Automated detection completed using "${state.session.gun_name}" profile (v${state.session.signature_version})${limitNote}. Review or drag markers to refine.`;
   } else {
-    els.editorStatusText.textContent = `Training Mode (Cold Start) for "${state.session.gun_name}". Place Beep (B) and Shots (S) on the waveform, then confirm to build the profile.`;
+    els.editorStatusText.textContent = `Training Mode (Cold Start) for "${state.session.gun_name}". Place Start Beep (B), optional Time Limit Beep (L), and Shots (S) on the waveform.`;
   }
 
   renderSignatureUI();
@@ -819,12 +1008,34 @@ function setBeepAtPlayhead() {
   if (!state.wavesurfer || !state.session) return;
   const now = Number((els.practiceVideo.currentTime || 0).toFixed(3));
   state.beepTimestamp = now;
+  ensureBeepOrder();
   state.userModified = true;
   state.selectedMarker = { type: "beep" };
   els.deleteMarkerBtn.disabled = false;
   syncWaveformMarkers();
   renderAnalyticsUI();
-  showToast(`Timer Beep anchor set at ${now.toFixed(3)}s`);
+  showToast(`Start Beep anchor set at ${state.beepTimestamp.toFixed(3)}s`);
+}
+
+function setEndBeepAtPlayhead() {
+  if (!state.wavesurfer || !state.session) return;
+  const now = Number((els.practiceVideo.currentTime || 0).toFixed(3));
+  if (state.beepTimestamp === null) {
+    state.beepTimestamp = now;
+    state.selectedMarker = { type: "beep" };
+    showToast(`Start Beep anchor set at ${now.toFixed(3)}s`);
+  } else {
+    state.endBeepTimestamp = now;
+    ensureBeepOrder();
+    state.selectedMarker = { type: "end-beep" };
+    showToast(
+      `Time Limit (2nd Beep) set at ${state.endBeepTimestamp.toFixed(3)}s`
+    );
+  }
+  state.userModified = true;
+  els.deleteMarkerBtn.disabled = false;
+  syncWaveformMarkers();
+  renderAnalyticsUI();
 }
 
 function addShotAtPlayhead() {
@@ -845,7 +1056,10 @@ function deleteSelectedMarker() {
   if (!state.selectedMarker) return;
   if (state.selectedMarker.type === "beep") {
     state.beepTimestamp = null;
-    showToast("Removed Timer Beep marker.");
+    showToast("Removed Start Beep marker.");
+  } else if (state.selectedMarker.type === "end-beep") {
+    state.endBeepTimestamp = null;
+    showToast("Removed Time Limit (2nd Beep) marker.");
   } else if (state.selectedMarker.type === "shot") {
     const idx = state.selectedMarker.index;
     if (state.shotTimestamps[idx] !== undefined) {
@@ -867,10 +1081,12 @@ async function saveAndRefineProfile() {
   els.saveProfileBtn.textContent = "Updating Acoustic Profile...";
 
   try {
+    ensureBeepOrder();
     const body = {
       video_id: state.session.video_id,
       gun_name: els.firearmInput.value.trim() || state.session.gun_name,
       beep_timestamp: state.beepTimestamp,
+      end_beep_timestamp: state.endBeepTimestamp,
       shot_timestamps: state.shotTimestamps,
       user_modified: state.userModified,
     };
@@ -967,10 +1183,12 @@ async function processAndRenderVideo() {
   showToast("Rendering burnt-in performance overlays with OpenCV...");
 
   try {
+    ensureBeepOrder();
     const body = {
       video_id: state.session.video_id,
       gun_name: els.firearmInput.value.trim() || state.session.gun_name,
       beep_timestamp: state.beepTimestamp,
+      end_beep_timestamp: state.endBeepTimestamp,
       shot_timestamps: state.shotTimestamps,
       user_modified: state.userModified,
     };
@@ -1154,6 +1372,9 @@ function bindEvents() {
 
   // Marker Toolbar Buttons
   els.addBeepBtn.addEventListener("click", setBeepAtPlayhead);
+  if (els.addEndBeepBtn) {
+    els.addEndBeepBtn.addEventListener("click", setEndBeepAtPlayhead);
+  }
   els.addShotBtn.addEventListener("click", addShotAtPlayhead);
   els.deleteMarkerBtn.addEventListener("click", deleteSelectedMarker);
 
@@ -1322,6 +1543,9 @@ function bindEvents() {
     if (e.key === "b" || e.key === "B") {
       e.preventDefault();
       setBeepAtPlayhead();
+    } else if (e.key === "l" || e.key === "L") {
+      e.preventDefault();
+      setEndBeepAtPlayhead();
     } else if (e.key === "s" || e.key === "S") {
       e.preventDefault();
       addShotAtPlayhead();

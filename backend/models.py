@@ -70,6 +70,7 @@ class SessionAnnotationPayload(BaseModel):
     video_id: str
     gun_name: str
     beep_timestamp: Optional[float] = None
+    end_beep_timestamp: Optional[float] = None
     shot_timestamps: List[float] = Field(default_factory=list)
     user_modified: bool = False
 
@@ -78,8 +79,10 @@ class SessionCheckPayload(BaseModel):
     video_id: str
     gun_name: str
     ground_truth_beep: Optional[float] = None
+    ground_truth_end_beep: Optional[float] = None
     ground_truth_shots: List[float] = Field(default_factory=list)
     predicted_beep: Optional[float] = None
+    predicted_end_beep: Optional[float] = None
     predicted_shots: Optional[List[float]] = None
 
 
@@ -87,6 +90,7 @@ class SessionCheckResult(BaseModel):
     gun_name: str
     signature_version: int
     beep_error_ms: Optional[float] = None
+    end_beep_error_ms: Optional[float] = None
     precision: float
     recall: float
     f1_score: float
@@ -103,13 +107,18 @@ class ShotMetricItem(BaseModel):
     timestamp: float
     split_time: Optional[float] = None
     elapsed_time: Optional[float] = None
+    within_time_limit: bool = True
 
 
 class AnalyticsSummary(BaseModel):
     beep_timestamp: Optional[float] = None
+    end_beep_timestamp: Optional[float] = None
+    time_limit_duration: Optional[float] = None
     draw_time: Optional[float] = None
     total_stage_time: Optional[float] = None
     total_shots: int = 0
+    shots_before_limit: int = 0
+    shots_after_limit: int = 0
     shots: List[ShotMetricItem] = Field(default_factory=list)
 
 
@@ -123,8 +132,10 @@ class SessionRecord(BaseModel):
     mode: str  # "training" or "automated"
     signature_version: Optional[int] = None
     beep_timestamp: Optional[float] = None
+    end_beep_timestamp: Optional[float] = None
     shot_timestamps: List[float] = Field(default_factory=list)
     predicted_beep: Optional[float] = None
+    predicted_end_beep: Optional[float] = None
     predicted_shots: List[float] = Field(default_factory=list)
     user_modified: bool = False
     rendered_video_url: Optional[str] = None

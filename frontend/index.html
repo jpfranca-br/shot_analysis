@@ -139,9 +139,11 @@
           <div class="waveform-wrapper">
             <div class="waveform-header">
               <div class="legend-items">
-                <span class="legend-item"><i class="dot dot-beep"></i> Timer Beep (Anchor t = 0.00s)</span>
-                <span class="legend-item"><i class="dot dot-shot"></i> Gunshot Marker (S₁…Sₙ)</span>
-                <span class="legend-item"><i class="dot dot-selected"></i> Selected Marker</span>
+                <span class="legend-item"><i class="dot dot-beep"></i> Start Beep (t = 0.00s)</span>
+                <span class="legend-item"><i class="dot dot-limit"></i> Time Limit Beep (2nd)</span>
+                <span class="legend-item"><i class="dot dot-shot-before"></i> Shot ≤ Limit</span>
+                <span class="legend-item"><i class="dot dot-shot-after"></i> Shot &gt; Limit (Overtime)</span>
+                <span class="legend-item"><i class="dot dot-selected"></i> Selected</span>
               </div>
               <div class="zoom-control">
                 <label for="zoomSlider">Zoom</label>
@@ -178,8 +180,11 @@
             </div>
 
             <div class="marker-controls">
-              <button type="button" id="addBeepBtn" class="btn btn-amber" disabled title="Set Timer Beep at Playhead (Shortcut: B)">
-                + Set Beep <kbd>B</kbd>
+              <button type="button" id="addBeepBtn" class="btn btn-amber" disabled title="Set Start Timer Beep at Playhead (Shortcut: B)">
+                + Start Beep <kbd>B</kbd>
+              </button>
+              <button type="button" id="addEndBeepBtn" class="btn btn-purple" disabled title="Set 2nd Beep / Time Limit at Playhead (Shortcut: L)">
+                + Time Limit <kbd>L</kbd>
               </button>
               <button type="button" id="addShotBtn" class="btn btn-cyan" disabled title="Add Gunshot at Playhead (Shortcut: S)">
                 + Add Shot <kbd>S</kbd>
@@ -413,6 +418,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=5"></script>
+  <script src="/app.js?v=6"></script>
 </body>
 </html>

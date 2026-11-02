@@ -1,6 +1,6 @@
 from pathlib import Path
 import subprocess
-from typing import List
+from typing import List, Optional
 
 import cv2
 import imageio_ffmpeg
@@ -15,11 +15,12 @@ def generate_synthetic_practice_video(
     beep_time: float = 1.00,
     shot_times: List[float] = None,
     beep_freq_hz: float = 3000.0,
+    end_beep_time: Optional[float] = None,
 ) -> Path:
     """
     Generate a realistic synthetic shooting practice video (.mp4) with:
     - Visual range target, stage clock, and muzzle flash at each shot
-    - Acoustic 22050 Hz track containing a clear timer beep and gunshot transients
+    - Acoustic 22050 Hz track containing a clear timer beep (plus optional 2nd time-limit beep) and gunshot transients
     """
     if shot_times is None:
         shot_times = [2.25, 2.70, 3.10, 3.55]
@@ -33,22 +34,26 @@ def generate_synthetic_practice_video(
     rng = np.random.default_rng(42)
     audio = rng.normal(0.0, 0.004, size=total_samples).astype(np.float32)
 
-    # 1. Add Timer Beep (pure tone + slight harmonic, 220 ms duration)
+    # 1. Add Timer Beep(s) (pure tone + slight harmonic, 220 ms duration)
     beep_dur = 0.22
-    beep_start = int(beep_time * sr)
-    beep_end = min(total_samples, int((beep_time + beep_dur) * sr))
-    if beep_end > beep_start:
-        bt = np.arange(beep_end - beep_start, dtype=np.float32) / float(sr)
-        envelope = np.ones_like(bt)
-        fade = min(len(bt) // 6, int(0.015 * sr))
-        if fade > 0:
-            envelope[:fade] = np.linspace(0.0, 1.0, fade)
-            envelope[-fade:] = np.linspace(1.0, 0.0, fade)
-        tone = (
-            0.55 * np.sin(2.0 * np.pi * beep_freq_hz * bt)
-            + 0.12 * np.sin(2.0 * np.pi * (beep_freq_hz * 2.0) * bt)
-        )
-        audio[beep_start:beep_end] += tone * envelope
+    beep_list = [beep_time]
+    if end_beep_time is not None:
+        beep_list.append(end_beep_time)
+    for b_time_val in beep_list:
+        beep_start = int(b_time_val * sr)
+        beep_end = min(total_samples, int((b_time_val + beep_dur) * sr))
+        if beep_end > beep_start:
+            bt = np.arange(beep_end - beep_start, dtype=np.float32) / float(sr)
+            envelope = np.ones_like(bt)
+            fade = min(len(bt) // 6, int(0.015 * sr))
+            if fade > 0:
+                envelope[:fade] = np.linspace(0.0, 1.0, fade)
+                envelope[-fade:] = np.linspace(1.0, 0.0, fade)
+            tone = (
+                0.55 * np.sin(2.0 * np.pi * beep_freq_hz * bt)
+                + 0.12 * np.sin(2.0 * np.pi * (beep_freq_hz * 2.0) * bt)
+            )
+            audio[beep_start:beep_end] += tone * envelope
 
     # 2. Add Gunshot Impulses (broadband burst + low-mid punch with exponential decay)
     for st in shot_times:

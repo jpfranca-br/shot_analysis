@@ -384,5 +384,62 @@ def test_multimodal_slow_and_fast_shot_regimes(tmp_path: Path):
         assert abs(pred - exp) <= 0.08
 
 
+def test_two_beeps_start_and_time_limit_scoring(tmp_path: Path):
+    """Verify two-beep detection (1st = start, 2nd = time limit) and before/after limit shot classification."""
+    from backend.analytics import compute_analytics
+    from backend.audio_engine import (
+        detect_events_with_limit,
+        extract_normalized_mono_pcm,
+        update_signature_profile,
+    )
+
+    vid_path = tmp_path / "two_beeps_drill.mp4"
+    wav_path = tmp_path / "two_beeps_drill.wav"
+    # Start beep at 0.80s, Time limit beep at 3.10s; Shots at 1.60s (in limit), 2.25s (in limit), 3.75s (overtime)
+    expected_shots = [1.60, 2.25, 3.75]
+    generate_synthetic_practice_video(
+        output_mp4_path=vid_path,
+        duration_sec=5.0,
+        fps=30.0,
+        beep_time=0.80,
+        end_beep_time=3.10,
+        shot_times=expected_shots,
+    )
+    extract_normalized_mono_pcm(vid_path, wav_path)
+
+    sig = update_signature_profile(
+        existing=None,
+        gun_name="CZ P-10C 9mm",
+        wav_path=wav_path,
+        beep_timestamp=0.80,
+        shot_timestamps=expected_shots,
+        video_path=vid_path,
+        video_id="vid_par_1",
+        base_dir=tmp_path,
+    )
+
+    det_beep, det_shots, det_end_beep = detect_events_with_limit(
+        wav_path=wav_path,
+        signature=sig,
+        video_path=vid_path,
+        base_dir=tmp_path,
+    )
+    assert det_beep is not None and abs(det_beep - 0.80) <= 0.12
+    assert det_end_beep is not None and abs(det_end_beep - 3.10) <= 0.12
+    assert len(det_shots) == 3
+    for pred, exp in zip(det_shots, expected_shots):
+        assert abs(pred - exp) <= 0.08
+
+    summary = compute_analytics(det_beep, det_shots, det_end_beep)
+    assert summary.end_beep_timestamp is not None
+    assert summary.time_limit_duration == pytest.approx(det_end_beep - det_beep, abs=0.02)
+    assert summary.shots_before_limit == 2
+    assert summary.shots_after_limit == 1
+    assert summary.shots[0].within_time_limit is True
+    assert summary.shots[1].within_time_limit is True
+    assert summary.shots[2].within_time_limit is False
+
+
+
 
 

@@ -197,19 +197,35 @@ def _compute_draw_motion_surge(
     return float(np.clip((ratio - 0.8) / 2.5, 0.0, 1.0))
 
 
-def detect_multimodal_beep(
+def _find_spaced_peaks(
+    norm_curve: np.ndarray, min_val: float, min_dist_frames: int, max_peaks: int = 6
+) -> List[int]:
+    """Iteratively pick peaks >= min_val separated by at least min_dist_frames (handles flat-top plateaus)."""
+    work = norm_curve.copy()
+    peaks: List[int] = []
+    for _ in range(max_peaks):
+        idx = int(np.argmax(work))
+        if float(work[idx]) < min_val:
+            break
+        peaks.append(idx)
+        lo = max(0, idx - min_dist_frames)
+        hi = min(len(work), idx + min_dist_frames + 1)
+        work[lo:hi] = 0.0
+    return peaks
+
+
+def detect_multimodal_beeps(
     y: np.ndarray,
     sr: int,
     signature: FirearmAudioSignature,
     cap: Optional[cv2.VideoCapture] = None,
     max_beep_time: Optional[float] = None,
-) -> Optional[float]:
+) -> Tuple[Optional[float], Optional[float]]:
     """
-    Detect the Shot Timer Beep combining:
-      1. Narrowband Spectral Crest Factor (max_bin / mean_bin in 800-5000 Hz) + low spectral flatness
-      2. Original cf032ba narrowband tonal energy score around target frequency
-      3. Video post-beep draw motion surge verification
-    Prevents loud broadband gunshots from ever masquerading as a timer beep.
+    Detect one or two Shot Timer Beeps:
+      - If 1 beep is present: returns (start_beep, None)
+      - If 2 narrowband timer beeps are present (separated by >= 1.2s):
+        returns (first_beep_as_start, second_beep_as_time_limit).
     """
     hop_length = 128
     n_fft_fine = 2048
@@ -226,7 +242,6 @@ def detect_multimodal_beep(
     )
     max_frame = max(10, min(S_fine.shape[1], max_frame))
 
-    # Broad shot-timer frequency band (800 Hz - 5000 Hz)
     timer_mask = (freqs_fine >= 800.0) & (freqs_fine <= 5000.0)
     S_band = S_fine[timer_mask, :max_frame]
     f_band = freqs_fine[timer_mask]
@@ -234,16 +249,15 @@ def detect_multimodal_beep(
 
     max_bin = np.max(S_band, axis=0)
     mean_bin = np.mean(S_band, axis=0) + 1e-7
-    crest = max_bin / mean_bin  # Pure tone has crest > 12; gunshot has crest < 5
+    crest = max_bin / mean_bin
     total_e = np.sum(S_fine[:, :max_frame], axis=0) + 1e-7
     e_floor = float(np.percentile(total_e, 25))
 
-    # Target frequency affinity (soft Gaussian weight so different timers at 1700-3500 Hz still work)
     target_freq = signature.beep_profile.frequency_hz or 3000.0
     dom_freq_idx = np.argmax(S_band, axis=0)
     dom_freqs = f_band[dom_freq_idx]
     freq_dist = np.abs(dom_freqs - target_freq)
-    freq_affinity = np.exp(-0.5 * (freq_dist / 900.0) ** 2)  # broad 900Hz sigma
+    freq_affinity = np.exp(-0.5 * (freq_dist / 900.0) ** 2)
 
     pure_tone_raw = np.where(
         (total_e > e_floor * 1.8) & (crest > 10.0) & (flat_sub < 0.08),
@@ -259,26 +273,20 @@ def detect_multimodal_beep(
     )
     kernel = np.ones(dur_frames, dtype=np.float32) / float(dur_frames)
     smoothed_crest = np.convolve(pure_tone_raw, kernel, mode="same")
+    min_beep_dist_frames = int(0.8 * sr / hop_length)
 
     if float(np.max(smoothed_crest)) > 1e-3:
         norm_crest = smoothed_crest / float(np.max(smoothed_crest))
-        cand_peaks = librosa.util.peak_pick(
-            norm_crest,
-            pre_max=8,
-            post_max=8,
-            pre_avg=16,
-            post_avg=16,
-            delta=0.20,
-            wait=int(0.4 * sr / hop_length),
+        cand_peaks = _find_spaced_peaks(
+            norm_crest, min_val=0.35, min_dist_frames=min_beep_dist_frames, max_peaks=6
         )
-        if len(cand_peaks) == 0:
-            cand_peaks = np.array([int(np.argmax(smoothed_crest))])
+        if not cand_peaks:
+            cand_peaks = [int(np.argmax(smoothed_crest))]
 
-        best_score = -1.0
-        best_onset_time = 0.0
         has_beep_feat = any(abs(x) > 1e-6 for x in signature.beep_profile.features)
+        scored_beeps: List[Tuple[float, float, float]] = []
 
-        for pk in cand_peaks[:5]:
+        for pk in cand_peaks[:6]:
             pk_idx = int(pk)
             thresh = 0.25 * smoothed_crest[pk_idx]
             onset_f = pk_idx
@@ -302,11 +310,24 @@ def detect_multimodal_beep(
                 _compute_draw_motion_surge(cap, b_time) if len(cand_peaks) > 1 else 0.5
             )
             total_b_score = 0.70 * c_score + 0.20 * feat_sim + 0.10 * draw_bonus
-            if total_b_score > best_score:
-                best_score = total_b_score
-                best_onset_time = b_time
+            scored_beeps.append((total_b_score, round(b_time, 3), c_score))
 
-        return round(float(best_onset_time), 3)
+        scored_beeps.sort(key=lambda x: x[0], reverse=True)
+        primary_time = scored_beeps[0][1]
+
+        # Check if there is a valid second narrowband timer beep >= 1.2s away
+        second_time: Optional[float] = None
+        for sc, bt, raw_c in scored_beeps[1:]:
+            if abs(bt - primary_time) >= 1.20 and raw_c >= 0.35 and sc >= 0.40:
+                second_time = bt
+                break
+
+        if second_time is not None:
+            start_b = min(primary_time, second_time)
+            limit_b = max(primary_time, second_time)
+            return start_b, limit_b
+
+        return primary_time, None
 
     # Fallback: Original cf032ba narrowband tonal detector (for synthetic/demo tones)
     n_fft = 1024
@@ -327,16 +348,65 @@ def detect_multimodal_beep(
     smoothed_tonal = np.convolve(tonal_score, kernel, mode="same")
 
     if float(np.max(smoothed_tonal)) > 1e-4:
+        norm_tonal = smoothed_tonal / float(np.max(smoothed_tonal))
+        t_peaks = _find_spaced_peaks(
+            norm_tonal, min_val=0.35, min_dist_frames=min_beep_dist_frames, max_peaks=6
+        )
+        if not t_peaks:
+            t_peaks = [int(np.argmax(smoothed_tonal))]
+
+        tonal_candidates: List[Tuple[float, float]] = []
+        for pk in t_peaks[:6]:
+            pk_idx = int(pk)
+            if float(flatness[pk_idx]) >= 0.08:
+                continue
+            threshold = 0.30 * smoothed_tonal[pk_idx]
+            onset_frame = pk_idx
+            while onset_frame > 0 and smoothed_tonal[onset_frame - 1] >= threshold:
+                onset_frame -= 1
+            b_t = round(
+                float(librosa.frames_to_time(onset_frame, sr=sr, hop_length=hop_length)),
+                3,
+            )
+            tonal_candidates.append((float(norm_tonal[pk_idx]), b_t))
+
+        if tonal_candidates:
+            tonal_candidates.sort(key=lambda x: x[0], reverse=True)
+            first_t = tonal_candidates[0][1]
+            second_t: Optional[float] = None
+            for sc, bt in tonal_candidates[1:]:
+                if abs(bt - first_t) >= 1.20 and sc >= 0.38:
+                    second_t = bt
+                    break
+            if second_t is not None:
+                return min(first_t, second_t), max(first_t, second_t)
+            return first_t, None
+
         peak_idx = int(np.argmax(smoothed_tonal))
         threshold = 0.30 * smoothed_tonal[peak_idx]
         onset_frame = peak_idx
         while onset_frame > 0 and smoothed_tonal[onset_frame - 1] >= threshold:
             onset_frame -= 1
-        return round(
-            float(librosa.frames_to_time(onset_frame, sr=sr, hop_length=hop_length)), 3
+        return (
+            round(
+                float(librosa.frames_to_time(onset_frame, sr=sr, hop_length=hop_length)),
+                3,
+            ),
+            None,
         )
 
-    return None
+    return None, None
+
+
+def detect_multimodal_beep(
+    y: np.ndarray,
+    sr: int,
+    signature: FirearmAudioSignature,
+    cap: Optional[cv2.VideoCapture] = None,
+    max_beep_time: Optional[float] = None,
+) -> Optional[float]:
+    start_b, _ = detect_multimodal_beeps(y, sr, signature, cap, max_beep_time)
+    return start_b
 
 
 def propose_candidate_peaks(
@@ -344,6 +414,7 @@ def propose_candidate_peaks(
     sr: int,
     beep_timestamp: Optional[float],
     cap: Optional[cv2.VideoCapture] = None,
+    end_beep_timestamp: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """
     Propose candidate transient events after `beep_timestamp` using the original cf032ba
@@ -407,6 +478,14 @@ def propose_candidate_peaks(
         loc_onset = float(np.max(onset_env[max(0, p - 2) : min(n_frames, p + 3)]))
         onset_norm = min(1.0, loc_onset / onset_max)
         loc_flat = float(np.max(flatness[max(0, p - 1) : min(n_frames, p + 5)]))
+
+        # Exclude the 2nd (Time Limit) Beep tone itself from being proposed as a gunshot
+        if (
+            end_beep_timestamp is not None
+            and abs(cand_t - end_beep_timestamp) <= 0.25
+            and loc_flat < 0.12
+        ):
+            continue
 
         # High-frequency muzzle crack ratio in [p, p+4]
         s_slice = S[:, max(0, p - 1) : min(S.shape[1], p + 4)]
@@ -642,30 +721,31 @@ def _compute_dataset_cv_f1(samples: List[Dict[str, Any]]) -> Optional[float]:
     return round(float(f1_score(y_true, preds, zero_division=0)), 4)
 
 
-def detect_multimodal_events(
+def detect_multimodal_events_with_limit(
     wav_path: Path,
     signature: FirearmAudioSignature,
     video_path: Optional[Path] = None,
     base_dir: Optional[Path] = None,
-) -> Tuple[Optional[float], List[float]]:
+) -> Tuple[Optional[float], List[float], Optional[float]]:
     """
-    Detect Timer Beep and Gunshot timestamps using:
-      1. Narrowband Spectral-Crest + Video Draw-Motion Beep Detector
-      2. Original cf032ba 16-D template similarity + Slow (>2000ms) / Fast (<=2000ms) Reverb Step-Up Physics
-      3. Synchronized OpenCV Video Recoil Jerk & Blur Shock features
-      4. Per-firearm Supervised Random Forest Classifier (when positive & hard-negative samples exist)
+    Detect Start Beep, Gunshot timestamps, and optional 2nd (Time Limit) Beep.
+    Returns (beep_timestamp, shot_timestamps, end_beep_timestamp).
     """
     y, sr = librosa.load(str(wav_path), sr=22050, mono=True)
     if len(y) < sr * 0.2:
-        return None, []
+        return None, [], None
 
     cap: Optional[cv2.VideoCapture] = None
     if video_path is not None and video_path.exists():
         cap = cv2.VideoCapture(str(video_path))
 
     try:
-        beep_timestamp = detect_multimodal_beep(y, sr, signature, cap)
-        candidates = propose_candidate_peaks(y, sr, beep_timestamp, cap)
+        beep_timestamp, end_beep_timestamp = detect_multimodal_beeps(
+            y, sr, signature, cap
+        )
+        candidates = propose_candidate_peaks(
+            y, sr, beep_timestamp, cap, end_beep_timestamp=end_beep_timestamp
+        )
         # Safety Net: If beep_timestamp was placed near the end of the video leaving 0 candidates,
         # re-detect the beep prior to the first major broadband transient in the recording
         if not candidates and beep_timestamp is not None:
@@ -676,11 +756,12 @@ def detect_multimodal_events(
             if strong_cands:
                 first_shot_t = strong_cands[0]["cand_time"]
                 if beep_timestamp >= first_shot_t - 0.10:
-                    earlier_beep = detect_multimodal_beep(
+                    earlier_beep, earlier_limit = detect_multimodal_beeps(
                         y, sr, signature, cap, max_beep_time=first_shot_t - 0.15
                     )
                     if earlier_beep is not None:
                         beep_timestamp = earlier_beep
+                        end_beep_timestamp = earlier_limit
                         candidates = [
                             c
                             for c in all_cands
@@ -691,7 +772,7 @@ def detect_multimodal_events(
             cap.release()
 
     if not candidates:
-        return beep_timestamp, []
+        return beep_timestamp, [], end_beep_timestamp
 
     # Load per-firearm supervised classifier if training samples exist
     clf: Optional[RandomForestClassifier] = None
@@ -787,7 +868,22 @@ def detect_multimodal_events(
         if not shot_timestamps or (cand_t - shot_timestamps[-1]) >= 0.10:
             shot_timestamps.append(round(float(cand_t), 3))
 
-    return beep_timestamp, shot_timestamps
+    return beep_timestamp, shot_timestamps, end_beep_timestamp
+
+
+def detect_multimodal_events(
+    wav_path: Path,
+    signature: FirearmAudioSignature,
+    video_path: Optional[Path] = None,
+    base_dir: Optional[Path] = None,
+) -> Tuple[Optional[float], List[float]]:
+    beep_t, shots, _ = detect_multimodal_events_with_limit(
+        wav_path=wav_path,
+        signature=signature,
+        video_path=video_path,
+        base_dir=base_dir,
+    )
+    return beep_t, shots
 
 
 def evaluate_session_predictions(

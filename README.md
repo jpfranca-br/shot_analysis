@@ -14,12 +14,14 @@ A web-based application designed for firearms practitioners to analyze training 
     - **Multimodal (Video + Audio) Feature Extraction (`backend/multimodal_detector.py`):** Combines the proven `cf032ba` 16-D acoustic vector (`13 MFCCs + spectral centroid + spectral bandwidth + spectral flatness`), narrowband spectral-crest beep detection, positive reverb step-up physics, and synchronized OpenCV visual recoil jerk, motion blur shock, and muzzle flash features.
     - **Slow Shots ($>2000\text{ ms}$) vs. Fast Shots ($\le 2000\text{ ms}$) Regime Physics & Templates:** Models slow/first shots ($>2000\text{ ms}$ apart) separately from fast follow-up shots ($\le 2000\text{ ms}$ apart riding on indoor reverberation tails).
     - **Multi-Video Positive + Hard-Negative Classifier & "Check Accuracy" Scorecard:** Each confirmed video harvests positive shots and hard negatives (reverb tails, range chatter, brass bounces) to train a per-firearm `scikit-learn` Random Forest classifier, and includes a **✔ Check Model Accuracy vs. Ground Truth** button to evaluate Precision, Recall, F1, and timing error (ms) across your test videos.
+    - **Two-Beep (Start Beep + Time Limit / Par Time) Detection & Scoring Colors:** When a recording contains two timer beeps, the first beep is treated as the **Start Beep** ($t = 0.00\text{s}$, Amber) and the second beep as the **Time Limit Beep** (Purple). Shots occurring before or at the time limit (`✓ In Limit`) are highlighted in **Emerald Green**, while shots after the time limit (`⏰ Overtime`) are highlighted in **Orange-Red** across the waveform, splits table, live HUD, and burnt-in OpenCV rendered video.
   - **Continuous Profile Refinement:** Every time you confirm or adjust markers, the firearm's acoustic signature vector (`signatures.json`) is refined and versioned (`v1`, `v2`, ...).
 - **Synchronized Video & 60fps Waveform Editor**
   - HTML5 video player locked in sync with an interactive **WaveSurfer.js v7** waveform and timeline ruler.
   - Variable playback speed (`0.5x`, `0.75x`, `1.0x`), timeline scrubbing, and waveform zoom slider.
   - Drag-and-drop markers and rapid keyboard shortcuts:
-    - <kbd>B</kbd> — Set Timer Beep anchor at playhead ($t = 0.00\text{s}$)
+    - <kbd>B</kbd> — Set Start Timer Beep anchor at playhead ($t = 0.00\text{s}$)
+    - <kbd>L</kbd> — Set 2nd Beep (Time Limit / Par Time) at playhead
     - <kbd>S</kbd> — Add Gunshot marker at playhead ($S_1, S_2, \dots, S_n$)
     - <kbd>Delete</kbd> / <kbd>Backspace</kbd> — Remove selected marker
     - <kbd>Space</kbd> — Play / Pause

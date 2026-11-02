@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.analytics import compute_analytics
 from backend.audio_engine import (
+    detect_events_with_limit,
     detect_events_with_profile,
     extract_normalized_mono_pcm,
     update_signature_profile,
@@ -236,12 +237,13 @@ async def upload_video(
         # FR-2.2: Training Mode (Cold Start)
         mode = "training"
         beep_timestamp = None
+        end_beep_timestamp = None
         shot_timestamps = []
         sig_version = None
     else:
         # FR-2.3: Automated Mode using Multimodal (Video + Audio) detection
         mode = "automated"
-        beep_timestamp, shot_timestamps = detect_events_with_profile(
+        beep_timestamp, shot_timestamps, end_beep_timestamp = detect_events_with_limit(
             wav_path=wav_path,
             signature=signature,
             video_path=video_path,
@@ -259,14 +261,18 @@ async def upload_video(
         mode=mode,
         signature_version=sig_version,
         beep_timestamp=beep_timestamp,
+        end_beep_timestamp=end_beep_timestamp,
         shot_timestamps=shot_timestamps,
         predicted_beep=beep_timestamp,
+        predicted_end_beep=end_beep_timestamp,
         predicted_shots=list(shot_timestamps),
         user_modified=False,
     )
     storage.save_session(session)
 
-    analytics = compute_analytics(beep_timestamp, shot_timestamps)
+    analytics = compute_analytics(
+        beep_timestamp, shot_timestamps, end_beep_timestamp=end_beep_timestamp
+    )
 
     return {
         "session": session.model_dump(),
@@ -301,11 +307,12 @@ def create_demo_session(
     if signature is None:
         mode = "training"
         beep_timestamp = None
+        end_beep_timestamp = None
         shot_timestamps = []
         sig_version = None
     else:
         mode = "automated"
-        beep_timestamp, shot_timestamps = detect_events_with_profile(
+        beep_timestamp, shot_timestamps, end_beep_timestamp = detect_events_with_limit(
             wav_path=wav_path,
             signature=signature,
             video_path=video_path,
@@ -323,13 +330,17 @@ def create_demo_session(
         mode=mode,
         signature_version=sig_version,
         beep_timestamp=beep_timestamp,
+        end_beep_timestamp=end_beep_timestamp,
         shot_timestamps=shot_timestamps,
         predicted_beep=beep_timestamp,
+        predicted_end_beep=end_beep_timestamp,
         predicted_shots=list(shot_timestamps),
         user_modified=False,
     )
     storage.save_session(session)
-    analytics = compute_analytics(beep_timestamp, shot_timestamps)
+    analytics = compute_analytics(
+        beep_timestamp, shot_timestamps, end_beep_timestamp=end_beep_timestamp
+    )
 
     return {
         "session": session.model_dump(),
@@ -346,7 +357,11 @@ def get_session_details(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     signature = storage.get_signature(session.gun_name)
-    analytics = compute_analytics(session.beep_timestamp, session.shot_timestamps)
+    analytics = compute_analytics(
+        session.beep_timestamp,
+        session.shot_timestamps,
+        end_beep_timestamp=session.end_beep_timestamp,
+    )
     return {
         "session": session.model_dump(),
         "analytics": analytics.model_dump(),
@@ -369,6 +384,13 @@ def save_and_refine_annotations(
     gun_name = payload.gun_name.strip() or session.gun_name
     sorted_shots = sorted(round(float(t), 4) for t in payload.shot_timestamps if t is not None)
     beep_t = round(float(payload.beep_timestamp), 4) if payload.beep_timestamp is not None else None
+    end_beep_t = (
+        round(float(payload.end_beep_timestamp), 4)
+        if payload.end_beep_timestamp is not None
+        else None
+    )
+    if beep_t is not None and end_beep_t is not None and end_beep_t < beep_t:
+        beep_t, end_beep_t = end_beep_t, beep_t
 
     wav_path = storage.uploads_dir / f"{session.video_id}.wav"
     if not wav_path.exists():
@@ -396,12 +418,15 @@ def save_and_refine_annotations(
 
     session.gun_name = gun_name
     session.beep_timestamp = beep_t
+    session.end_beep_timestamp = end_beep_t
     session.shot_timestamps = sorted_shots
     session.user_modified = payload.user_modified
     session.signature_version = updated_sig.signature_version
     storage.save_session(session)
 
-    analytics = compute_analytics(beep_t, sorted_shots)
+    analytics = compute_analytics(
+        beep_t, sorted_shots, end_beep_timestamp=end_beep_t
+    )
 
     return {
         "session": session.model_dump(),
@@ -499,6 +524,7 @@ def process_and_render_video(
         gun_name=updated_session.gun_name,
         beep_timestamp=updated_session.beep_timestamp,
         shot_timestamps=updated_session.shot_timestamps,
+        end_beep_timestamp=updated_session.end_beep_timestamp,
     )
 
     download_url = f"/api/videos/{session.video_id}/download"

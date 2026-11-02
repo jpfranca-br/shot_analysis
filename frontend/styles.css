@@ -344,6 +344,15 @@ input[type="text"]:focus {
   background: rgba(6, 182, 212, 0.3);
 }
 
+.btn-purple {
+  background: rgba(168, 85, 247, 0.18);
+  border-color: rgba(168, 85, 247, 0.55);
+  color: #d8b4fe;
+}
+.btn-purple:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.3);
+}
+
 .btn-danger {
   background: rgba(239, 68, 68, 0.16);
   border-color: rgba(239, 68, 68, 0.5);
@@ -550,8 +559,17 @@ kbd {
 .dot-beep {
   background: #f59e0b;
 }
+.dot-limit {
+  background: #a855f7;
+}
 .dot-shot {
   background: #06b6d4;
+}
+.dot-shot-before {
+  background: #10b981;
+}
+.dot-shot-after {
+  background: #f97316;
 }
 .dot-selected {
   background: #f43f5e;

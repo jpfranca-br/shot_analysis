@@ -15,6 +15,7 @@ from backend.multimodal_detector import (
     SLOW_SHOT_THRESHOLD_SEC,
     cosine_similarity,
     detect_multimodal_events,
+    detect_multimodal_events_with_limit,
     extract_cf032ba_window_features,
     extract_video_window_features,
     harvest_and_save_training_samples,
@@ -427,6 +428,31 @@ def detect_events_with_profile(
                 break
 
     return detect_multimodal_events(
+        wav_path=wav_path,
+        signature=signature,
+        video_path=video_path,
+        base_dir=base_dir,
+    )
+
+
+def detect_events_with_limit(
+    wav_path: Path,
+    signature: FirearmAudioSignature,
+    video_path: Optional[Path] = None,
+    base_dir: Optional[Path] = None,
+) -> Tuple[Optional[float], List[float], Optional[float]]:
+    """
+    Automated detection returning (beep_timestamp, shot_timestamps, end_beep_timestamp).
+    If two timer beeps are detected, the first is the start beep and the second is the time limit.
+    """
+    if video_path is None:
+        for ext in (".mp4", ".mov", ".webm"):
+            cand_v = wav_path.with_suffix(ext)
+            if cand_v.exists():
+                video_path = cand_v
+                break
+
+    return detect_multimodal_events_with_limit(
         wav_path=wav_path,
         signature=signature,
         video_path=video_path,

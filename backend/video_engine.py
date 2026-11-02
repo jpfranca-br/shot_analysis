@@ -41,17 +41,22 @@ def render_annotated_video(
     gun_name: str,
     beep_timestamp: Optional[float],
     shot_timestamps: List[float],
+    end_beep_timestamp: Optional[float] = None,
     popup_duration_sec: float = 1.6,
 ) -> Path:
     """
     Generate an annotated output video using opencv-python (FR-5.1, FR-5.2, FR-5.3).
     Displays:
-    - A clear visual indicator when the Timer Beep occurs (t = 0.00s).
+    - A clear visual indicator when the Start Timer Beep occurs (t = 0.00s) and optional Time Limit (2nd) Beep.
     - A pop-up and persistent text overlay showing Shot Number, Split Time,
-      and Total Elapsed Time for 1-2 seconds following each shot event.
+      and Total Elapsed Time, color-coded for shots before vs. after the Time Limit.
     """
     output_video_path.parent.mkdir(parents=True, exist_ok=True)
-    analytics = compute_analytics(beep_timestamp, shot_timestamps)
+    analytics = compute_analytics(
+        beep_timestamp, shot_timestamps, end_beep_timestamp=end_beep_timestamp
+    )
+    beep_timestamp = analytics.beep_timestamp
+    end_beep_timestamp = analytics.end_beep_timestamp
     shots: List[ShotMetricItem] = analytics.shots
 
     cap = cv2.VideoCapture(str(input_video_path))
@@ -185,6 +190,52 @@ def render_annotated_video(
                 cv2.LINE_AA,
             )
 
+        # 2b. Second Beep (Time Limit) Visual Indicator
+        if (
+            end_beep_timestamp is not None
+            and end_beep_timestamp <= t <= end_beep_timestamp + 1.35
+        ):
+            limit_age = t - end_beep_timestamp
+            beep_w = int(380 * scale_factor)
+            beep_h = int(58 * scale_factor)
+            bx1 = max(pad, (width - beep_w) // 2)
+            by1 = pad
+            _draw_rounded_panel(
+                frame,
+                bx1,
+                by1,
+                bx1 + beep_w,
+                by1 + beep_h,
+                bg_color=(65, 18, 78),
+                border_color=(245, 95, 215),
+                alpha=0.90,
+                border_thickness=2,
+            )
+            dot_radius = int((8 + 4 * np.sin(limit_age * 16.0)) * scale_factor)
+            cv2.circle(
+                frame,
+                (bx1 + int(26 * scale_factor), by1 + beep_h // 2),
+                max(4, dot_radius),
+                (250, 110, 230),
+                -1,
+                cv2.LINE_AA,
+            )
+            limit_rel = (
+                f"+{end_beep_timestamp - beep_timestamp:.2f}s"
+                if beep_timestamp is not None
+                else f"{end_beep_timestamp:.2f}s"
+            )
+            cv2.putText(
+                frame,
+                f"TIME LIMIT BEEP  |  {limit_rel}",
+                (bx1 + int(48 * scale_factor), by1 + int(36 * scale_factor)),
+                font,
+                0.60 * scale_factor,
+                (245, 200, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
         # 3. Shot Event Pop-up Overlay (FR-5.2: 1-2s following each shot event)
         active_shot: Optional[ShotMetricItem] = None
         for s in shots:
@@ -192,10 +243,22 @@ def render_annotated_video(
                 active_shot = s
 
         if active_shot is not None:
-            card_w = int(420 * scale_factor)
+            card_w = int(450 * scale_factor)
             card_h = int(112 * scale_factor)
             cx1 = pad
             cy1 = height - card_h - pad
+
+            has_limit = end_beep_timestamp is not None
+            in_limit = active_shot.within_time_limit
+            if has_limit:
+                card_border = (115, 225, 45) if in_limit else (35, 115, 255)
+                title_color = (120, 250, 95) if in_limit else (70, 145, 255)
+                limit_tag = " [IN LIMIT]" if in_limit else " [AFTER LIMIT]"
+            else:
+                card_border = (80, 120, 255)
+                title_color = (90, 210, 255)
+                limit_tag = ""
+
             _draw_rounded_panel(
                 frame,
                 cx1,
@@ -203,7 +266,7 @@ def render_annotated_video(
                 cx1 + card_w,
                 cy1 + card_h,
                 bg_color=(18, 22, 34),
-                border_color=(80, 120, 255),
+                border_color=card_border,
                 alpha=0.86,
                 border_thickness=2,
             )
@@ -218,9 +281,9 @@ def render_annotated_video(
                 )
             )
             elapsed_label = (
-                f"TOTAL ELAPSED: {active_shot.elapsed_time:.2f}s"
+                f"TOTAL ELAPSED: {active_shot.elapsed_time:.2f}s{limit_tag}"
                 if active_shot.elapsed_time is not None
-                else f"TIME: {active_shot.timestamp:.2f}s"
+                else f"TIME: {active_shot.timestamp:.2f}s{limit_tag}"
             )
 
             cv2.putText(
@@ -229,7 +292,7 @@ def render_annotated_video(
                 (cx1 + int(16 * scale_factor), cy1 + int(34 * scale_factor)),
                 font,
                 0.78 * scale_factor,
-                (90, 210, 255),
+                title_color,
                 2,
                 cv2.LINE_AA,
             )
@@ -290,7 +353,13 @@ def render_annotated_video(
                 el_txt = f"{s.elapsed_time:.2f}s" if s.elapsed_time is not None else f"{s.timestamp:.2f}s"
                 line_txt = f"#{s.shot_number:<2}  {sp_txt:<8}  {el_txt}"
                 is_latest = s.shot_number == fired_shots[-1].shot_number
-                color = (100, 255, 180) if is_latest else (220, 225, 235)
+                if end_beep_timestamp is not None:
+                    if s.within_time_limit:
+                        color = (100, 255, 140) if is_latest else (150, 230, 170)
+                    else:
+                        color = (60, 130, 255) if is_latest else (95, 155, 250)
+                else:
+                    color = (100, 255, 180) if is_latest else (220, 225, 235)
                 cv2.putText(
                     frame,
                     line_txt,
