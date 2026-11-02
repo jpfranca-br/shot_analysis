@@ -1277,12 +1277,12 @@ function bindEvents() {
       return;
     }
     if (!file) {
-      showToast("Please select a video file (.mp4, .mov, .webm) or click 'Load Sample Drill Video'.", true);
+      showToast("Please select a video file (.mp4, .mov, .webm) or click 'Load Sample'.", true);
       return;
     }
 
     els.uploadBtn.disabled = true;
-    els.uploadBtn.textContent = "⏳ Extracting Audio & Analyzing...";
+    els.uploadBtn.textContent = "⏳ Analyzing...";
 
     try {
       const formData = new FormData();
@@ -1306,15 +1306,15 @@ function bindEvents() {
       showToast(err.message, true);
     } finally {
       els.uploadBtn.disabled = false;
-      els.uploadBtn.textContent = "Analyze Video & Extract PCM Audio";
+      els.uploadBtn.textContent = "Analyze";
     }
   });
 
-  // Load Sample Drill Video Button
+  // Load Sample Button
   els.demoBtn.addEventListener("click", async () => {
     const gunName = els.firearmInput.value.trim() || "CZ P-10C 9mm";
     els.demoBtn.disabled = true;
-    els.demoBtn.textContent = "⏳ Generating Sample Drill...";
+    els.demoBtn.textContent = "⏳ Generating Sample...";
 
     try {
       const formData = new FormData();
@@ -1338,7 +1338,7 @@ function bindEvents() {
       showToast(err.message, true);
     } finally {
       els.demoBtn.disabled = false;
-      els.demoBtn.textContent = "Load Sample Drill Video";
+      els.demoBtn.textContent = "Load Sample";
     }
   });
 
