@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shooting Practice Video Analyzer</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <!-- WaveSurfer.js v7 + Regions & Timeline Plugins -->
+  <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+  <script src="https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.min.js"></script>
+  <script src="https://unpkg.com/wavesurfer.js@7/dist/plugins/timeline.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Navigation & Status Header -->
+    <header class="top-header">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">◎</div>
+        <div>
+          <h1>Shooting Practice Video Analyzer</h1>
+          <p class="subtitle">Acoustic Signature Recognition • Split Timing • Burnt-In Performance Overlays</p>
+        </div>
+      </div>
+
+      <div class="header-badges">
+        <div id="modeBadge" class="status-badge badge-neutral">Awaiting Video Upload</div>
+        <div id="signatureBadge" class="status-badge badge-outline">No Profile Loaded</div>
+      </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="workspace-grid">
+      <!-- Left Column: Upload + Video Player + Interactive Waveform -->
+      <section class="left-column">
+        <!-- Module 1: Project Initialization & Upload -->
+        <div class="panel upload-panel" id="uploadPanel">
+          <div class="panel-header">
+            <h2>1. Session Setup & Video Upload</h2>
+            <span class="panel-tag">FR-1.1 – FR-1.3</span>
+          </div>
+
+          <form id="uploadForm" class="upload-form">
+            <div class="form-group">
+              <label for="firearmPreset">Select Firearm Model</label>
+              <div class="firearm-input-row">
+                <select id="firearmPreset" aria-label="Firearm Preset">
+                  <option value="Glock 19">Glock 19</option>
+                  <option value="Sig P320">Sig P320</option>
+                  <option value="CZ Shadow 2">CZ Shadow 2</option>
+                  <option value="Staccato P">Staccato P</option>
+                  <option value="Smith & Wesson M&P9">Smith &amp; Wesson M&amp;P9</option>
+                  <option value="__custom__">+ Custom Firearm Name...</option>
+                </select>
+                <input
+                  type="text"
+                  id="firearmInput"
+                  name="gun_name"
+                  value="Glock 19"
+                  placeholder="Enter firearm model (e.g., Glock 19)"
+                  required
+                />
+              </div>
+              <small id="profileHint" class="field-hint">Checking local signature database...</small>
+            </div>
+
+            <div class="form-group file-drop-group">
+              <label for="videoFileInput">Practice Video (<code>.mp4</code>, <code>.mov</code>, <code>.webm</code>)</label>
+              <div class="drop-zone" id="dropZone">
+                <input
+                  type="file"
+                  id="videoFileInput"
+                  name="video"
+                  accept=".mp4,.mov,.webm,video/mp4,video/quicktime,video/webm"
+                />
+                <div class="drop-zone-content">
+                  <span class="drop-icon">⬆</span>
+                  <span id="selectedFileName">Drag &amp; drop training video or click to browse</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="upload-actions">
+              <button type="submit" id="uploadBtn" class="btn btn-primary">
+                Analyze Video &amp; Extract PCM Audio
+              </button>
+              <button type="button" id="demoBtn" class="btn btn-secondary" title="Generate a realistic synthetic shooting drill video with timer beep and 4 shots">
+                Load Sample Drill Video
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Module 3: Synchronized Video & Interactive Waveform Editor -->
+        <div class="panel editor-panel" id="editorPanel">
+          <div class="panel-header">
+            <div>
+              <h2>2. Synchronized Video &amp; Waveform Editor</h2>
+              <p class="panel-subtext" id="editorStatusText">
+                Upload a video or load the sample drill to annotate timer beep and gunshots.
+              </p>
+            </div>
+            <div class="video-source-toggle" id="videoSourceToggle" hidden>
+              <button type="button" id="viewOriginalBtn" class="btn btn-xs btn-active">Original Video</button>
+              <button type="button" id="viewRenderedBtn" class="btn btn-xs">Rendered Overlay Preview</button>
+            </div>
+          </div>
+
+          <!-- Video Viewport -->
+          <div class="video-container">
+            <video id="practiceVideo" playsinline preload="metadata" crossorigin="anonymous"></video>
+            <!-- Live HUD Preview Overlay on top of HTML5 video -->
+            <div id="liveVideoHud" class="live-video-hud" hidden>
+              <div id="hudBeepBanner" class="hud-beep-banner" hidden>
+                <span class="pulse-dot"></span> TIMER BEEP | t = 0.00s
+              </div>
+              <div id="hudShotCard" class="hud-shot-card" hidden>
+                <div class="hud-shot-title" id="hudShotNumber">SHOT #1</div>
+                <div class="hud-shot-metrics">
+                  <span id="hudShotSplit">DRAW: 0.00s</span>
+                  <span id="hudShotElapsed">TOTAL: 0.00s</span>
+                </div>
+              </div>
+            </div>
+            <div id="videoPlaceholder" class="video-placeholder">
+              <div class="placeholder-inner">
+                <span class="placeholder-icon">▶</span>
+                <p>No active video session loaded</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive Audio Waveform (WaveSurfer.js) -->
+          <div class="waveform-wrapper">
+            <div class="waveform-header">
+              <div class="legend-items">
+                <span class="legend-item"><i class="dot dot-beep"></i> Timer Beep (Anchor t = 0.00s)</span>
+                <span class="legend-item"><i class="dot dot-shot"></i> Gunshot Marker (S₁…Sₙ)</span>
+                <span class="legend-item"><i class="dot dot-selected"></i> Selected Marker</span>
+              </div>
+              <div class="zoom-control">
+                <label for="zoomSlider">Zoom</label>
+                <input type="range" id="zoomSlider" min="10" max="300" value="40" disabled />
+              </div>
+            </div>
+
+            <div id="waveformContainer" class="waveform-canvas"></div>
+            <div id="waveformTimeline" class="waveform-timeline"></div>
+          </div>
+
+          <!-- Playback & Marker Toolbar (FR-3.2, FR-3.3, FR-3.4) -->
+          <div class="editor-toolbar">
+            <div class="transport-controls">
+              <button type="button" id="playPauseBtn" class="btn btn-icon" disabled title="Play / Pause (Space)">
+                ▶ Play
+              </button>
+              <button type="button" id="stopBtn" class="btn btn-icon" disabled title="Stop & Return to Start">
+                ■ Stop
+              </button>
+              <div class="speed-control">
+                <label for="speedSelect">Speed</label>
+                <select id="speedSelect" disabled>
+                  <option value="0.5">0.5x</option>
+                  <option value="0.75">0.75x</option>
+                  <option value="1" selected>1.0x</option>
+                </select>
+              </div>
+              <div class="time-readout">
+                <span id="currentTimeDisplay">0.000s</span>
+                <span class="time-sep">/</span>
+                <span id="durationDisplay">0.000s</span>
+                <span id="stageTimeDisplay" class="stage-time-pill">Stage: --</span>
+              </div>
+            </div>
+
+            <div class="marker-controls">
+              <button type="button" id="addBeepBtn" class="btn btn-amber" disabled title="Set Timer Beep at Playhead (Shortcut: B)">
+                + Set Beep <kbd>B</kbd>
+              </button>
+              <button type="button" id="addShotBtn" class="btn btn-cyan" disabled title="Add Gunshot at Playhead (Shortcut: S)">
+                + Add Shot <kbd>S</kbd>
+              </button>
+              <button type="button" id="deleteMarkerBtn" class="btn btn-danger" disabled title="Delete Selected Marker (Shortcut: Delete)">
+                Delete Marker <kbd>Del</kbd>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column: Analytics, Acoustic Signature Profile, and Video Rendering -->
+      <aside class="right-column">
+        <!-- Module 4: Analytics & Split Calculation -->
+        <div class="panel analytics-panel">
+          <div class="panel-header">
+            <h2>3. Performance Analytics &amp; Splits</h2>
+            <span class="panel-tag">FR-4.1 – FR-4.2</span>
+          </div>
+
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <span class="kpi-label">Draw / First Shot</span>
+              <strong class="kpi-value" id="kpiDrawTime">--</strong>
+              <span class="kpi-sub">Beep → Shot 1</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">Total Stage Time</span>
+              <strong class="kpi-value" id="kpiTotalTime">--</strong>
+              <span class="kpi-sub">Beep → Final Shot</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">Avg Split Time</span>
+              <strong class="kpi-value" id="kpiAvgSplit">--</strong>
+              <span class="kpi-sub" id="kpiShotCount">0 Shots</span>
+            </div>
+          </div>
+
+          <!-- Split Table -->
+          <div class="table-container">
+            <table class="splits-table" id="splitsTable">
+              <thead>
+                <tr>
+                  <th>Event</th>
+                  <th>Raw Time</th>
+                  <th>Split (Δt)</th>
+                  <th>Elapsed</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="splitsTableBody">
+                <tr class="empty-row">
+                  <td colspan="5">No markers placed yet. Press <kbd>B</kbd> for Beep and <kbd>S</kbd> for Shots.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Module 2: Audio Profile & Signature Management -->
+        <div class="panel signature-panel">
+          <div class="panel-header">
+            <h2>4. Firearm Acoustic Signature</h2>
+            <span class="panel-tag">FR-2.1 – FR-2.4</span>
+          </div>
+
+          <div class="signature-details" id="signatureDetails">
+            <div class="sig-row">
+              <span>Firearm Profile:</span>
+              <strong id="sigGunName">--</strong>
+            </div>
+            <div class="sig-row">
+              <span>Signature Version:</span>
+              <strong id="sigVersion">Cold Start (Unlearned)</strong>
+            </div>
+            <div class="sig-row">
+              <span>Beep Frequency / Duration:</span>
+              <strong id="sigBeepMeta">--</strong>
+            </div>
+            <div class="sig-row">
+              <span>Shot Envelope Decay Rate:</span>
+              <strong id="sigShotMeta">--</strong>
+            </div>
+          </div>
+
+          <div class="signature-actions">
+            <button type="button" id="saveProfileBtn" class="btn btn-secondary btn-full" disabled>
+              Confirm Markers &amp; Refine Audio Profile
+            </button>
+          </div>
+        </div>
+
+        <!-- Module 5: Video Overlay Rendering -->
+        <div class="panel render-panel">
+          <div class="panel-header">
+            <h2>5. Video Overlay Rendering</h2>
+            <span class="panel-tag">FR-5.1 – FR-5.3</span>
+          </div>
+
+          <p class="panel-description">
+            Generates an annotated MP4 video (<code>opencv-python</code>) with burnt-in Timer Beep indicator, Shot Number, Split Time, and Total Elapsed Time overlays.
+          </p>
+
+          <div class="render-actions">
+            <button type="button" id="processVideoBtn" class="btn btn-accent btn-full" disabled>
+              ⚙ Process Video with Burnt-In Overlays
+            </button>
+
+            <a
+              id="downloadVideoLink"
+              class="btn btn-success btn-full"
+              href="#"
+              download
+              hidden
+            >
+              ⬇ Download Annotated Video (.MP4)
+            </a>
+          </div>
+
+          <div id="statusToast" class="status-toast" hidden></div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
